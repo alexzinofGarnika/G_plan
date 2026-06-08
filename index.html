@@ -53,7 +53,7 @@ body{font-family:'Golos Text',sans-serif;background:var(--bg);color:var(--text);
 .wd-inputs{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text2)}
 .wd-num{width:40px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;
   padding:3px 5px;font-size:11px;color:var(--text);font-family:'JetBrains Mono',monospace;
-  text-align:center;outline:none;-moz-appearance:textfield}
+  text-align:center;outline:none;-moz-appearance:textfield;appearance:textfield}
 .wd-num::-webkit-outer-spin-button,
 .wd-num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .zl{font-size:11px;color:var(--text3);font-family:'JetBrains Mono',monospace;min-width:58px;text-align:center}
@@ -150,7 +150,7 @@ body{font-family:'Golos Text',sans-serif;background:var(--bg);color:var(--text);
 .lp-stage{display:flex;align-items:center;gap:5px;height:var(--g-stage-h,42px);padding:0 8px 0 44px;border-bottom:1px solid var(--border);cursor:pointer}
 .lp-stage:hover{background:var(--bg3)}
 .lp-purchasing{padding-left:30px;background:linear-gradient(to right,rgba(63,185,80,.05),transparent 40%)}
-.lp-purchasing .stage-lbl{font-weight:500}
+.lp-purchasing .stage-lbl{font-size:13px;font-weight:500;letter-spacing:-.1px;margin-left:auto;text-align:right}
 .gbar-purch{color:#fff;font-size:11px;font-weight:600;text-shadow:0 1px 2px rgba(0,0,0,.5)}
 .gbar.gbar-done{opacity:.5;text-decoration:line-through}
 .g-purch-mk{position:absolute;top:9px;width:22px;height:24px;display:flex;align-items:center;justify-content:center;font-size:13px;z-index:7;pointer-events:auto;cursor:help;transform:translateX(-11px);filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
@@ -255,7 +255,7 @@ body{font-family:'Golos Text',sans-serif;background:var(--bg);color:var(--text);
 /* stage bar row */
 .g-stage{position:relative;height:var(--g-stage-h,42px);border-bottom:1px solid var(--border)}
 .g-stage:hover{background:rgba(88,166,255,.04)}
-.gbar{position:absolute;top:9px;height:calc(var(--g-stage-h,42px) - 18px);min-height:14px;border-radius:5px;cursor:grab;display:flex;align-items:center;padding:0 6px;overflow:hidden;user-select:none;z-index:4}
+.gbar{position:absolute;top:50%;transform:translateY(-50%);height:calc(var(--g-stage-h,42px) - 12px);min-height:12px;max-height:calc(var(--g-stage-h,42px) - 6px);border-radius:5px;cursor:grab;display:flex;align-items:center;padding:0 6px;overflow:hidden;user-select:none;z-index:4}
 .gbar:hover{filter:brightness(1.1);box-shadow:0 2px 10px rgba(0,0,0,.4)}
 .gbar:active{cursor:grabbing}
 .gbar-lbl{font-size:10px;color:rgba(255,255,255,.9);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;pointer-events:none}
@@ -828,6 +828,7 @@ function ord2db(o){return{
 function sub2db(s,orderId,seq){return{
   id:s.id, order_id:orderId, name:s.name,
   qty:s.qty||{sheets:0,edgeMeters:0,parts:0}, seq,
+  status:s.status==='done'?'done':'inprogress',
 }}
 function stage2db(st,subId,seq){return{
   id:st.uid, suborder_id:subId, stage_id:st.id,
@@ -847,6 +848,7 @@ function db2ord(row,subs,stagesBySub){return{
   collapsed:false,  /* per-user → Этап позже */
   suborders:subs.slice().sort((a,b)=>a.seq-b.seq).map(s=>({
     id:s.id, name:s.name, qty:s.qty,
+    status:s.status==='done'?'done':'inprogress',
     stages:(stagesBySub[s.id]||[]).slice().sort((a,b)=>a.seq-b.seq).map(x=>({
       id:x.stage_id, uid:x.id,
       start:x.start_date, end:x.end_date,
@@ -1304,6 +1306,24 @@ function dk(d){
    16 треугольных зубцов по кругу + светло-стальное тело + тёмный
    центральный болт + декоративные дуги (отблески металла).
    Анимация вращения задана в CSS через .g-purch-mk-saw. */
+function buildHalfSawSVG(){
+  /* Половина диска пилы (верхняя), используется как мини-иконка для
+     кнопки «Производство». ViewBox обрезает диск по горизонтальной
+     оси, остаётся только верхняя половина с зубцами. */
+  let teeth='';
+  const N=14;
+  for(let i=0;i<N;i++){
+    const ang=(360/N)*i;
+    teeth+=`<polygon points="6,-46 9,-34 7,-30 -9,-30 -5,-39" transform="rotate(${ang})"/>`;
+  }
+  return `<svg viewBox="-50 -52 100 56" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" width="22" height="12" style="display:block">
+    <g fill="currentColor" stroke="currentColor" stroke-width="0.8" stroke-linejoin="round">
+      ${teeth}
+      <circle cx="0" cy="0" r="30"/>
+    </g>
+    <circle cx="0" cy="0" r="6" fill="var(--bg3)" stroke="currentColor" stroke-width="1.5"/>
+  </svg>`;
+}
 function buildSawBladeSVG(){
   /* Агрессивные зубцы-крюки с наклоном в сторону вращения.
      Анимация крутит диск по часовой стрелке, значит «вперёд» для
@@ -1390,12 +1410,31 @@ async function openDeliveryFile(fileId,fileName,withPrint){  if(!fileId){alert('
   try{row=await db.fetchDeliveryFile(fileId)}
   catch(e){alert('Не удалось загрузить файл: '+(e.message||e));return false}
   if(!row||!row.data){alert('Файл не найден в базе');return false}
-  /* base64 → Uint8Array → Blob */
-  const bin=atob(row.data);
-  const bytes=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
-  const mime=row.mime_type||'application/octet-stream';
-  const blob=new Blob([bytes],{type:mime});
+  /* row.data может прийти как полный data URL (data:mime;base64,XXX) — так
+     его записывает uploadDeliveryFileToDB через FileReader.readAsDataURL —
+     либо как чистый base64 (для старых записей). Поддерживаем оба случая. */
+  let mime=row.mime_type||'application/octet-stream';
+  let base64=row.data;
+  if(typeof base64==='string'&&base64.startsWith('data:')){
+    const commaIdx=base64.indexOf(',');
+    if(commaIdx>=0){
+      const meta=base64.substring(5,commaIdx);
+      const isB64=meta.endsWith(';base64');
+      if(isB64&&meta.length>7)mime=meta.slice(0,-7);
+      base64=base64.substring(commaIdx+1);
+    }
+  }
+  let blob;
+  try{
+    const bin=atob(base64);
+    const bytes=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    blob=new Blob([bytes],{type:mime});
+  }catch(e){
+    console.error('Декодирование base64 не удалось:',e,'data preview:',base64.substring(0,40));
+    alert('Не удалось декодировать содержимое файла');
+    return false;
+  }
   const url=URL.createObjectURL(blob);
   const w=window.open(url,'_blank');
   if(!w){alert('Браузер заблокировал открытие окна. Разрешите всплывающие окна для этого сайта.');URL.revokeObjectURL(url);return false}
@@ -1842,6 +1881,21 @@ function ensureOrderPurchasing(order){
   seedFromLegacy('mat','matDelivery');
   seedFromLegacy('hw','hwDelivery');
   seedFromLegacy('paint','paintDelivery');
+  /* Авто-статус закупки. Логика:
+     - Если все поставки приняты (delivered + receivedBy) И ни у одной нет
+       открытой рекламации → status = 'done'.
+     - Иначе если есть хоть одна поставка → status = 'inprogress'.
+     - Если поставок нет вообще — оставляем как есть (по умолчанию 'pending').
+     Не переключаем автоматически статус 'blocked' — он ставится вручную
+     и означает осознанную блокировку закупки пользователем. */
+  const ps=order.purchasing;
+  if(ps.status!=='blocked'){
+    const ds=Array.isArray(ps.deliveries)?ps.deliveries:[];
+    if(ds.length>0){
+      const allReady=ds.every(d=>d.delivered&&d.receivedBy&&!d.claim);
+      ps.status=allReady?'done':'inprogress';
+    }
+  }
   return order.purchasing;
 }
 
@@ -3722,6 +3776,15 @@ function addLPSub(lpR,order,sub,scoll){
   /* Drag-handle для перетаскивания изделия внутри своего заказа */
   const grip=tx('span','lp-grip','⋮⋮');grip.title='Перетащите для изменения порядка';
   ls.appendChild(grip);
+  /* Цветной кружок-индикатор статуса изделия: синий — в работе
+     (var(--accent)), зелёный — готово. Меняется вручную в модалке изделия. */
+  const st=sub.status==='done'?'done':'inprogress';
+  const dot=el('span','');
+  const dotColor=st==='done'?'#3fb950':'var(--accent)';
+  dot.style.cssText='display:inline-block;width:8px;height:8px;border-radius:50%;'
+    +'background:'+dotColor+';flex-shrink:0;margin-right:4px';
+  dot.title=st==='done'?'Изделие готово':'Изделие в работе';
+  ls.appendChild(dot);
   ls.appendChild(tx('span','chev','▶'));ls.appendChild(tx('span','sub-name',sub.name+' ('+sub.stages.length+' эт.)'));
   /* Кнопка настройки изделия скрыта для ролей без права менять изделия */
   if(!S.isReadonly&&!S.isPurchaser){
@@ -3977,99 +4040,22 @@ function mkKbCard(order,colId,subsToShow,isFull){
     const ss=stageStartDt(st),se=stageEndDt(st);
     if(ss<=NOW&&NOW<se)activeIds.add(st.id);
   }));
-  const orderedActive=STAGE_DEFS.filter(def=>activeIds.has(def.id));
-  if(orderedActive.length){
-    const ac=el('div','kb-active-stages');
-    const hdr=el('div','kb-active-header');
-    hdr.appendChild(document.createTextNode('▶ Сейчас в работе ('+orderedActive.length+')'));
-    ac.appendChild(hdr);
-    orderedActive.forEach(def=>{
-      const row=el('div','kb-active-row');
-      row.style.cursor='help';
-      const dot=el('div','kb-active-dot');dot.style.background=def.color;row.appendChild(dot);
-      const sn=tx('span','kb-active-stage-name',def.lbl);row.appendChild(sn);
-      /* For assembly, name the specific products currently being assembled. */
-      if(def.id==='assembly'){
-        const names=subsToShow.filter(sub=>{
-          const asm=sub.stages.find(s=>s.id==='assembly');
-          if(!asm)return false;
-          const ss=stageStartDt(asm),se=stageEndDt(asm);
-          return ss<=NOW&&NOW<se;
-        }).map(sub=>sub.name);
-        if(names.length){
-          row.appendChild(tx('span','kb-active-subs','— '+names.join(', ')));
-        }
-      }
-      /* Tooltip с ответственными за этот этап. Собираем уникальные имена
-         по всем активным этапам этого типа во всех изделиях заказа.
-         Используем общий #tt-элемент с тем же стилем, что и для Ганта. */
-      const activeStagesOfDef=[];
-      subsToShow.forEach(sub=>{
-        sub.stages.forEach(st=>{
-          if(st.id!==def.id)return;
-          const ss=stageStartDt(st),se=stageEndDt(st);
-          if(ss<=NOW&&NOW<se)activeStagesOfDef.push({sub,stage:st});
-        });
-      });
-      row.addEventListener('mouseenter',ev=>{
-        const tt=document.getElementById('tt');if(!tt)return;
-        /* Собираем уникальных по идентификатору, помечаем «не назначен» */
-        const seen=new Set();
-        const lines=[];
-        let unassignedCount=0;
-        activeStagesOfDef.forEach(({sub,stage})=>{
-          const arr=Array.isArray(stage.assignees)?stage.assignees:[];
-          if(arr.length===0){unassignedCount++;return}
-          arr.forEach(v=>{
-            if(seen.has(v))return;
-            seen.add(v);
-            const u=resolveEmployee(v);
-            lines.push('👤 '+u.name+(u.role?' <span style="color:var(--text3);font-size:10px">· '+u.role+'</span>':''));
-          });
-        });
-        const dotHtml='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+def.color+';margin-right:6px;vertical-align:middle"></span>';
-        let html='<div class="tt-r" style="font-weight:600">'+dotHtml+def.lbl+'</div>';
-        if(lines.length){
-          html+='<div class="tt-r" style="color:var(--text2);margin-top:4px">'+lines.join('<br>')+'</div>';
-        }
-        if(unassignedCount>0){
-          html+='<div class="tt-r" style="color:#f85149;margin-top:4px">🏳 '+
-            (unassignedCount===1?'Этап без ответственного':unassignedCount+' этапов без ответственного')+'</div>';
-        }
-        if(!lines.length&&unassignedCount===0){
-          html+='<div class="tt-r" style="color:var(--text3)">— нет данных —</div>';
-        }
-        tt.innerHTML=html;
-        tt.style.display='block';
-        let x=ev.clientX+14,y=ev.clientY+14;
-        if(x+260>window.innerWidth)x=ev.clientX-260-14;
-        if(y+120>window.innerHeight)y=ev.clientY-120-14;
-        tt.style.left=x+'px';tt.style.top=y+'px';
-      });
-      row.addEventListener('mousemove',ev=>{
-        const tt=document.getElementById('tt');if(!tt||tt.style.display==='none')return;
-        let x=ev.clientX+14,y=ev.clientY+14;
-        if(x+260>window.innerWidth)x=ev.clientX-260-14;
-        if(y+120>window.innerHeight)y=ev.clientY-120-14;
-        tt.style.left=x+'px';tt.style.top=y+'px';
-      });
-      row.addEventListener('mouseleave',()=>hideTT());
-      ac.appendChild(row);
-    });
-    card.appendChild(ac);
-  }
-
-  // suborders list (only the subs assigned to this column)
-  const subs=el('div','kb-suborders');
-  subsToShow.forEach(sub=>{
-    const si=el('div','kb-sub');
-    const sdot=el('div','kb-sub-dot');sdot.style.background=sub.stages[0]?STAGE_DEFS.find(s=>s.id===sub.stages[0].id)?.color:'var(--border2)';
-    si.appendChild(sdot);
-    const dS=sub.stages.filter(x=>x.status==='done').length;
-    si.appendChild(tx('span','',sub.name+' ('+dS+'/'+sub.stages.length+')'));
-    subs.appendChild(si);
-  });
-  card.appendChild(subs);
+  /* Блоки «Сейчас в работе» (этапы) и «Список изделий» вынесены
+     в отдельную модалку «Производство» — открывается кнопкой ниже.
+     Карточка стала компактнее и содержит только заголовок/клиент/мета. */
+  const prodBtn=el('button','btn sm');
+  prodBtn.innerHTML='<span style="display:inline-flex;align-items:center;margin-right:6px">'
+    +buildHalfSawSVG()+'</span>Производство';
+  prodBtn.style.cssText='width:100%;margin-top:8px;font-size:12px;padding:6px 10px;'
+    +'background:transparent;border:1px solid var(--border2);color:var(--text);'
+    +'display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer';
+  prodBtn.onmouseenter=()=>{prodBtn.style.borderColor='var(--accent)';prodBtn.style.color='var(--accent)'};
+  prodBtn.onmouseleave=()=>{prodBtn.style.borderColor='var(--border2)';prodBtn.style.color='var(--text)'};
+  prodBtn.onclick=e=>{
+    e.stopPropagation();
+    openModal({type:'productionInfo',orderId:order.id});
+  };
+  card.appendChild(prodBtn);
 
   // edit btn — скрыта для ролей без права менять заказы
   if(!S.isReadonly&&!S.isPurchaser){
@@ -4786,10 +4772,36 @@ function renderModal(root){
     if(!m._init){
       m.subName=sub.name;m.sel=sub.stages.map(s=>s.id);
       m.qSheets=sub.qty?.sheets||0;m.qEdge=sub.qty?.edgeMeters||0;m.qParts=sub.qty?.parts||0;
+      m.subStatus=sub.status==='done'?'done':'inprogress';
       m._init=true;
     }
     modal.appendChild(tx('div','modal-title','Изделие: '+sub.name));
     addField(modal,'Название изделия','text',m.subName,v=>m.subName=v);
+
+    /* Статус изделия — ручной переключатель «В работе / Готово».
+       Отражается в LP в виде цветного кружочка перед именем изделия. */
+    {
+      const lbl=el('label','flbl');lbl.textContent='Статус изделия';
+      modal.appendChild(lbl);
+      const row=el('div','');
+      row.style.cssText='display:flex;gap:8px;margin-bottom:14px';
+      const mk=(val,label,color)=>{
+        const btn=el('button','btn sm');btn.type='button';
+        const active=m.subStatus===val;
+        btn.style.cssText='flex:1;padding:6px 10px;font-size:12px;display:flex;align-items:center;justify-content:center;gap:6px;'
+          +(active
+            ?'background:'+color+';border:1px solid '+color+';color:#fff;font-weight:600'
+            :'background:transparent;border:1px solid var(--border2);color:var(--text2)');
+        const dot=el('span','');
+        dot.style.cssText='width:8px;height:8px;border-radius:50%;background:'+(active?'#fff':color)+';flex-shrink:0';
+        btn.appendChild(dot);btn.appendChild(document.createTextNode(label));
+        btn.onclick=()=>{m.subStatus=val;renderModal(root)};
+        return btn;
+      };
+      row.appendChild(mk('inprogress','В работе','var(--accent)'));
+      row.appendChild(mk('done','Готово','#3fb950'));
+      modal.appendChild(row);
+    }
 
     /* per-suborder quantities */
     const qLbl=el('div','flbl');qLbl.innerHTML='Объём изделия <span style="color:var(--text3);font-size:10px">(используется в калькуляторах)</span>';modal.appendChild(qLbl);
@@ -4823,6 +4835,7 @@ function renderModal(root){
     modal.appendChild(delSub);
     addFooter(modal,()=>{
       sub.name=m.subName||'Изделие';
+      sub.status=m.subStatus==='done'?'done':'inprogress';
       const oldQty=sub.qty||{};
       const newQty={sheets:+m.qSheets||0,edgeMeters:+m.qEdge||0,parts:+m.qParts||0};
       const qtyChanged=oldQty.sheets!==newQty.sheets||oldQty.edgeMeters!==newQty.edgeMeters||oldQty.parts!==newQty.parts;
@@ -4973,7 +4986,61 @@ function renderModal(root){
     modal.appendChild(t);
     addField(modal,'Дата начала','date',m.start,v=>m.start=v);
     addField(modal,'Длительность (рабочих дней)','number',m.wd,v=>m.wd=+v||1);
-    addSelect(modal,'Статус',Object.entries(STAT_MAP).map(([k,v])=>[k,v.lbl]),m.status,v=>m.status=v);
+    /* Статус закупки рассчитывается автоматически (см. ensureOrderPurchasing):
+       все поставки приняты без рекламаций → done; есть поставки, не все
+       приняты → inprogress; нет поставок → pending. Единственный ручной
+       режим — флаг «Заблокирована»: пока он установлен, авто-логика не
+       трогает статус. */
+    {
+      const statusLabel=(STAT_MAP[m.status]||{lbl:m.status||'—'}).lbl;
+      const statusColor=(STAT_MAP[m.status]||{}).color||'var(--text2)';
+      const row=el('div','');
+      row.style.cssText='display:flex;align-items:center;gap:10px;margin:8px 0;font-size:12px';
+      const lbl=tx('span','','Статус:');lbl.style.color='var(--text2)';
+      row.appendChild(lbl);
+      const badge=el('span','');
+      badge.style.cssText='display:inline-flex;align-items:center;gap:6px;padding:3px 10px;'
+        +'background:var(--bg);border:1px solid var(--border2);border-radius:99px;'
+        +'font-size:11px;color:'+statusColor;
+      const dot=el('span','');dot.style.cssText='width:8px;height:8px;border-radius:50%;background:'+statusColor;
+      badge.appendChild(dot);badge.appendChild(document.createTextNode(statusLabel));
+      row.appendChild(badge);
+      const blockWrap=el('label','');
+      blockWrap.style.cssText='display:inline-flex;align-items:center;gap:5px;cursor:pointer;margin-left:auto;color:var(--text2)';
+      const blockCb=document.createElement('input');blockCb.type='checkbox';
+      blockCb.checked=m.status==='blocked';
+      blockCb.onchange=e=>{
+        if(e.target.checked)m.status='blocked';
+        else m.status='pending';
+        renderModal(root);
+      };
+      blockWrap.appendChild(blockCb);
+      blockWrap.appendChild(tx('span','','Заблокирована'));
+      row.appendChild(blockWrap);
+      modal.appendChild(row);
+    }
+
+    /* Модалка закупки может быть очень длинной (много поставок и файлов).
+       Ограничиваем высоту окна и пускаем поставки в собственный скролл
+       внутри, чтобы заголовок, поля параметров и footer-кнопки всегда
+       оставались на видном месте. */
+    modal.style.display='flex';
+    modal.style.flexDirection='column';
+    modal.style.maxHeight='calc(100vh - 80px)';
+    modal.style.width='640px';
+
+    /* Вкладки категорий поставок над прокручиваемой областью. Клик по
+       вкладке — плавная прокрутка scrollContent к началу соответствующей
+       секции (заголовок категории встаёт максимально высоко в окне). */
+    const tabsBar=el('div','');
+    tabsBar.style.cssText='display:flex;flex-wrap:wrap;gap:5px;margin:10px 0 6px;'
+      +'padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:8px';
+    /* Ссылки на DOM-узлы заголовков секций — заполняются в цикле ниже */
+    const sectionAnchors={};
+
+    /* Скроллируемая область — между header-полями и footer-кнопками */
+    const scrollContent=el('div','');
+    scrollContent.style.cssText='flex:1;min-height:0;overflow-y:auto;margin:0 -10px;padding:0 10px;scroll-behavior:smooth';
 
     /* === Deliveries list === */
     /* Совмещаем встроенные и пользовательские типы.
@@ -4990,6 +5057,59 @@ function renderModal(root){
       const meta=allTypes[type];
       if(!meta)return;
       const sec=el('div','');sec.style.cssText='margin:14px 0 6px;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r)';
+      sectionAnchors[type]=sec;
+      /* Считаем агрегированный статус категории для подсветки вкладки.
+         - hasOverdue: есть хоть одна непринятая поставка с просрочкой >3 дней;
+         - hasClaim: есть открытая рекламация;
+         - allDelivered: ВСЕ поставки приняты, без активных рекламаций;
+         - mixed: одновременно просрочка и рекламация;
+         - иначе — нейтральный статус. */
+      const inCat=m.deliveries.filter(x=>x.type===type);
+      const hasOverdue=inCat.some(x=>isDeliveryOverdue(x));
+      const hasClaim=inCat.some(x=>!!x.claim);
+      const allDelivered=inCat.length>0
+        &&inCat.every(x=>x.delivered&&x.receivedBy&&!x.claim);
+      let tabStatus=null;
+      if(hasOverdue&&hasClaim)tabStatus='mixed';
+      else if(hasOverdue)tabStatus='overdue';
+      else if(hasClaim)tabStatus='claim';
+      else if(allDelivered)tabStatus='delivered';
+      const statusColors={overdue:'#f85149',claim:'#fb923c',delivered:'#3fb950'};
+      /* Вкладка-кнопка для этой категории. Толщина border всегда 2px —
+         чтобы при смене статуса (например, после устранения рекламации)
+         layout табов не «прыгал». Для mixed используем фоновой trick
+         с двумя слоями: внутренний бэкграунд — bg2, внешний (через
+         border-box) — двухцветный градиент. */
+      const tab=el('button','');
+      let baseBorder='var(--border2)';
+      let bgRule=null;
+      if(tabStatus==='mixed'){
+        baseBorder='transparent';
+        bgRule='linear-gradient(var(--bg2),var(--bg2)) padding-box,'
+              +'linear-gradient(90deg,#f85149 0,#f85149 50%,#fb923c 50%,#fb923c 100%) border-box';
+      }else if(tabStatus){
+        baseBorder=statusColors[tabStatus];
+      }
+      tab.style.cssText='font-size:12px;padding:4px 9px;background:var(--bg2);border:2px solid '+baseBorder
+        +';border-radius:6px;color:var(--text);cursor:pointer;font-family:inherit;line-height:1;'
+        +'transition:filter .15s,color .15s';
+      if(bgRule)tab.style.background=bgRule;
+      tab.textContent=meta.icon+' '+meta.lbl;
+      const statusLabel=tabStatus==='mixed'?'просрочка и рекламация'
+        :tabStatus==='overdue'?'есть просрочка'
+        :tabStatus==='claim'?'есть открытая рекламация'
+        :tabStatus==='delivered'?'все поставки получены'
+        :'';
+      tab.title='Перейти к секции «'+meta.lbl+'»'+(statusLabel?' · '+statusLabel:'');
+      tab.onmouseenter=()=>{tab.style.filter='brightness(1.15)';if(tabStatus&&tabStatus!=='mixed')tab.style.color=statusColors[tabStatus]};
+      tab.onmouseleave=()=>{tab.style.filter='';tab.style.color='var(--text)'};
+      tab.onclick=()=>{
+        const target=sectionAnchors[type];
+        if(!target)return;
+        const top=target.offsetTop-scrollContent.offsetTop;
+        scrollContent.scrollTo({top,behavior:'smooth'});
+      };
+      tabsBar.appendChild(tab);
       const head=el('div','');head.style.cssText='display:flex;align-items:center;gap:6px;margin-bottom:8px';
       head.appendChild(tx('span','',meta.icon+' '+meta.lbl));
       const add=el('button','btn sm');add.style.marginLeft='auto';add.textContent='+ Поставка';
@@ -5128,18 +5248,30 @@ function renderModal(root){
             fileLine.appendChild(fileLbl);
             /* 👁 — открыть */
             const view=el('button','btn ic sm ro-keep');view.textContent='👁';view.title='Открыть';view.style.fontSize='11px';
-            view.onclick=async e=>{e.preventDefault();
-              if(f.fileId){await openDeliveryFile(f.fileId,f.name,false);return}
-              if(f.fileDataUrl){window.open(f.fileDataUrl,'_blank');return}
-              alert('Файл не прикреплён');
+            view.onclick=async e=>{
+              e.preventDefault();e.stopPropagation();
+              try{
+                if(f.fileId){await openDeliveryFile(f.fileId,f.name,false);return}
+                if(f.fileDataUrl){window.open(f.fileDataUrl,'_blank');return}
+                alert('Файл не прикреплён (нет fileId и dataUrl)');
+              }catch(err){
+                console.error('Ошибка открытия файла:',err);
+                alert('Не удалось открыть файл: '+(err.message||err));
+              }
             };
             fileLine.appendChild(view);
             /* 🖨 — печать */
             const printBtn=el('button','btn ic sm ro-keep');printBtn.textContent='🖨';printBtn.title='Печать';printBtn.style.fontSize='11px';
-            printBtn.onclick=async e=>{e.preventDefault();
-              if(f.fileId){await openDeliveryFile(f.fileId,f.name,true);return}
-              if(f.fileDataUrl){const w=window.open(f.fileDataUrl,'_blank');if(w)setTimeout(()=>{try{w.focus();w.print()}catch(_){}},800);return}
-              alert('Файл не прикреплён');
+            printBtn.onclick=async e=>{
+              e.preventDefault();e.stopPropagation();
+              try{
+                if(f.fileId){await openDeliveryFile(f.fileId,f.name,true);return}
+                if(f.fileDataUrl){const w=window.open(f.fileDataUrl,'_blank');if(w)setTimeout(()=>{try{w.focus();w.print()}catch(_){}},800);return}
+                alert('Файл не прикреплён (нет fileId и dataUrl)');
+              }catch(err){
+                console.error('Ошибка печати файла:',err);
+                alert('Не удалось распечатать файл: '+(err.message||err));
+              }
             };
             fileLine.appendChild(printBtn);
             /* 🗑 — открепить */
@@ -5204,7 +5336,7 @@ function renderModal(root){
              в начале этой строки. */
         });
       }
-      modal.appendChild(sec);
+      scrollContent.appendChild(sec);
     });
 
     /* Кнопка добавления новой категории закупки */
@@ -5223,7 +5355,7 @@ function renderModal(root){
       renderModal(root);
     };
     addCatRow.appendChild(addCatBtn);
-    modal.appendChild(addCatRow);
+    scrollContent.appendChild(addCatRow);
 
     /* Кнопка удаления закупки целиком — не валидирует, не сохраняет
        остальные поля. Ставит флаг disabled у закупки. Закупка скрывается
@@ -5232,7 +5364,11 @@ function renderModal(root){
     const delBtn=el('button','btn sm');delBtn.textContent='🗑 Удалить закупку';
     delBtn.style.cssText='color:var(--danger);border:1px solid var(--danger);background:transparent';
     delBtn.onclick=()=>{
-      const cnt=m.deliveries.filter(d=>d.date&&d.supplierId&&d.fileName).length;
+      const cnt=m.deliveries.filter(d=>{
+        if(!d.date||!d.supplierId)return false;
+        const dFiles=getDeliveryFiles(d);
+        return dFiles.length>0||!!d.fileName;
+      }).length;
       const warn=cnt>0
         ?'Удалить закупку? Будут скрыты '+cnt+' поставка(-и). Восстановить можно из карточки заказа.'
         :'Удалить закупку? Восстановить можно из карточки заказа.';
@@ -5242,7 +5378,10 @@ function renderModal(root){
       render();
     };
     delRow.appendChild(delBtn);
-    modal.appendChild(delRow);
+    scrollContent.appendChild(delRow);
+    /* Сначала — вкладки с категориями, затем сама прокручиваемая область */
+    if(tabsBar.children.length>0)modal.appendChild(tabsBar);
+    modal.appendChild(scrollContent);
 
     addField(modal,'Примечание (общее)','text',m.note,v=>m.note=v);
     addFooter(modal,()=>{
@@ -5254,7 +5393,9 @@ function renderModal(root){
         return ct?('«'+ct.lbl+'»'):'категории';
       };
       for(const d of m.deliveries){
-        const hasAny=d.date||d.supplierId||d.fileName||d.notes;
+        const dFiles=getDeliveryFiles(d);
+        const hasFiles=dFiles.length>0;
+        const hasAny=d.date||d.supplierId||hasFiles||d.notes;
         if(!hasAny)continue; // empty row — skip
         if(!d.supplierId){
           alert('Невозможно сохранить поставку '+lblFor(d.type)+': не указан поставщик. Выберите поставщика или удалите запись.');
@@ -5264,7 +5405,7 @@ function renderModal(root){
           alert('Невозможно сохранить поставку '+lblFor(d.type)+': не указана дата. Укажите дату или удалите запись.');
           return;
         }
-        if(!d.fileName){
+        if(!hasFiles){
           alert('Невозможно сохранить поставку '+lblFor(d.type)+' без прикреплённой заявки. Прикрепите файл или удалите запись.');
           return;
         }
@@ -5272,8 +5413,14 @@ function renderModal(root){
       ps.status=m.status;
       ps.note=m.note;
       ps.wd=Math.max(1,+m.wd||1);
-      /* Persist only fully-valid deliveries */
-      ps.deliveries=m.deliveries.filter(d=>d.date&&d.supplierId&&d.fileName);
+      /* Persist only fully-valid deliveries: поставка валидна, если у неё
+         есть дата, поставщик и хотя бы один прикреплённый файл (либо
+         legacy d.fileName, либо новая схема через d.files). */
+      ps.deliveries=m.deliveries.filter(d=>{
+        if(!d.date||!d.supplierId)return false;
+        const hasFiles=Array.isArray(d.files)&&d.files.length>0;
+        return hasFiles||!!d.fileName;
+      });
       ps.customTypes=(m.customTypes||[]).map(ct=>({...ct}));
       /* Реально удаляем файлы, которые пользователь убрал в этой сессии */
       if(m._filesToDelete&&m._filesToDelete.length){
@@ -5761,6 +5908,93 @@ function renderModal(root){
   }
 
   /* ── EDIT STAGE HOUR ── */
+  /* ── PRODUCTION INFO ──
+     Открывается из карточки Канбана. Содержит компактный список всех
+     изделий заказа с текущим активным этапом каждого изделия. */
+  else if(m.type==='productionInfo'){
+    const order=S.orders.find(o=>o.id===m.orderId);
+    if(!order){closeModal();return}
+    modal.style.minWidth='460px';
+    const titleEl=el('div','modal-title');
+    titleEl.style.cssText='display:flex;align-items:center;gap:8px';
+    const titleIcon=el('span','');
+    titleIcon.style.cssText='display:inline-flex;align-items:center;color:var(--accent)';
+    titleIcon.innerHTML=buildHalfSawSVG();
+    titleEl.appendChild(titleIcon);
+    titleEl.appendChild(document.createTextNode('Производство — '+order.name));
+    modal.appendChild(titleEl);
+    if(order.client){
+      const cli=tx('div','',order.client);
+      cli.style.cssText='font-size:12px;color:var(--text2);margin-top:-6px;margin-bottom:12px';
+      modal.appendChild(cli);
+    }
+    const NOW=new Date();
+    const list=el('div','');
+    list.style.cssText='display:flex;flex-direction:column;gap:6px;margin-top:6px';
+    if(order.suborders.length===0){
+      const empty=tx('div','','Изделий пока нет.');
+      empty.style.cssText='color:var(--text3);font-size:12px;padding:10px;text-align:center';
+      list.appendChild(empty);
+    }
+    order.suborders.forEach(sub=>{
+      const row=el('div','');
+      row.style.cssText='display:flex;align-items:center;gap:10px;padding:8px 10px;'
+        +'background:var(--bg);border:1px solid var(--border);border-radius:6px';
+      /* Кружок статуса изделия (то же что в LP): синий — в работе, зелёный — готово */
+      const st=sub.status==='done'?'done':'inprogress';
+      const dot=el('span','');
+      const dotColor=st==='done'?'#3fb950':'var(--accent)';
+      dot.style.cssText='width:10px;height:10px;border-radius:50%;background:'+dotColor+';flex-shrink:0';
+      dot.title=st==='done'?'Изделие готово':'Изделие в работе';
+      row.appendChild(dot);
+      /* Имя изделия */
+      const nameWrap=el('div','');
+      nameWrap.style.cssText='flex:1;min-width:0';
+      const name=tx('div','',sub.name);
+      name.style.cssText='font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      nameWrap.appendChild(name);
+      /* Текущий этап: ищем тот этап, у которого start <= NOW < end. */
+      let activeStage=null;
+      for(const stg of sub.stages){
+        const ss=stageStartDt(stg),se=stageEndDt(stg);
+        if(ss<=NOW&&NOW<se){activeStage=stg;break}
+      }
+      /* Сводка прогресса (готовых из всех) */
+      const dCount=sub.stages.filter(x=>x.status==='done').length;
+      const progress=tx('div','',dCount+' / '+sub.stages.length+' этапов завершено');
+      progress.style.cssText='font-size:11px;color:var(--text3);margin-top:2px';
+      nameWrap.appendChild(progress);
+      row.appendChild(nameWrap);
+      /* Бейдж текущего этапа */
+      const stageBadge=el('div','');
+      stageBadge.style.cssText='display:inline-flex;align-items:center;gap:5px;padding:3px 8px;'
+        +'border-radius:99px;font-size:11px;flex-shrink:0';
+      if(sub.status==='done'){
+        stageBadge.style.cssText+=';background:rgba(63,185,80,.12);border:1px solid #3fb950;color:#3fb950';
+        stageBadge.textContent='✓ Готово';
+      }else if(activeStage){
+        const def=STAGE_DEFS.find(d=>d.id===activeStage.id);
+        const c=def?.color||'var(--accent)';
+        stageBadge.style.cssText+=';background:'+c+'20;border:1px solid '+c+';color:'+c;
+        const sdot=el('span','');
+        sdot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+c;
+        stageBadge.appendChild(sdot);
+        stageBadge.appendChild(document.createTextNode(def?.lbl||activeStage.id));
+      }else{
+        stageBadge.style.cssText+=';background:var(--bg2);border:1px solid var(--border2);color:var(--text3)';
+        stageBadge.textContent='—';
+      }
+      row.appendChild(stageBadge);
+      list.appendChild(row);
+    });
+    modal.appendChild(list);
+    const ftr=el('div','');ftr.style.cssText='display:flex;justify-content:flex-end;margin-top:14px';
+    const closeBtn=el('button','btn pr');closeBtn.textContent='Закрыть';
+    closeBtn.onclick=()=>closeModal();
+    ftr.appendChild(closeBtn);
+    modal.appendChild(ftr);
+  }
+
   else if(m.type==='editStageHour'){
     const order=S.orders.find(o=>o.id===m.orderId);
     const sub=order.suborders.find(s=>s.id===m.subId);
