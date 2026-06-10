@@ -1530,23 +1530,61 @@ async function openDeliveryFile(fileId,fileName,withPrint){  if(!fileId){alert('
   setTimeout(()=>URL.revokeObjectURL(url),60000);
   return true;
 }
+/* Кэш интервалов занятости сотрудников. Собирается один раз при первом
+   обращении и сбрасывается в начале каждого render() через invalidate.
+   Структура: Map<userId, Array<{sMs, eMs, order, sub, stage}>>.
+   Это снимает квадратичную сложность с findUserConflict — открытие модалки
+   назначения ответственных перестаёт тормозить на больших проектах. */
+function _buildUserBusyCache(){
+  const cache=new Map();
+  for(const o of S.orders){
+    if(o.kbCol==='new')continue;  /* черновики не занимают мощность */
+    for(const s of o.suborders){
+      for(const st of s.stages){
+        const arr=Array.isArray(st.assignees)?st.assignees:[];
+        if(arr.length===0)continue;
+        /* Реальный интервал занятости — с учётом startHour и actualEnd
+           (так же, как в findConflicts). Это позволяет двум этапам в
+           один календарный день, но в разные часы, не конфликтовать. */
+        const sh=st.startHour!=null?st.startHour:S.workStart;
+        const sMs=parseISO(st.start).getTime()+sh*3600000;
+        const ae=stageActualEnd(st,s);
+        const eMs=parseISO(ae.date).getTime()+ae.hour*3600000;
+        const rec={sMs,eMs,order:o,sub:s,stage:st};
+        for(const v of arr){
+          if(!cache.has(v))cache.set(v,[]);
+          cache.get(v).push(rec);
+        }
+      }
+    }
+  }
+  return cache;
+}
+function _userBusyCache(){
+  if(!S._userBusyCacheRef)S._userBusyCacheRef=_buildUserBusyCache();
+  return S._userBusyCacheRef;
+}
+function invalidateUserBusyCache(){S._userBusyCacheRef=null}
+
 /* Проверка занятости сотрудника. Возвращает {order,sub,stage} первого
    пересечения с другим этапом, где user уже назначен. Если свободен — null.
    Параметр selfUid — id текущего редактируемого этапа (исключаем из поиска,
-   чтобы он не считался конфликтом с самим собой). */
-function findUserConflict(userVal,startStr,endStr,selfUid){
-  const a1=parseISO(startStr),a2=parseISO(endStr);
-  for(const o of S.orders){
-    if(o.kbCol==='new')continue;  /* черновики ещё не занимают мощность */
-    for(const s of o.suborders){
-      for(const st of s.stages){
-        if(st.uid===selfUid)continue;
-        if(!Array.isArray(st.assignees)||!st.assignees.includes(userVal))continue;
-        const b1=parseISO(st.start),b2=parseISO(st.end);
-        /* пересечение полуоткрытых интервалов [a1,a2) и [b1,b2) */
-        if(a1<b2&&b1<a2)return{order:o,sub:s,stage:st};
-      }
-    }
+   чтобы он не считался конфликтом с самим собой).
+   Сравниваем реальные часовые интервалы (startHour + stageActualEnd), а
+   не календарные даты — чтобы утро + день одного календарного дня не
+   считались пересечением. */
+function findUserConflict(userVal,myStage,mySub,selfUid){
+  if(!userVal)return null;
+  const aSh=myStage.startHour!=null?myStage.startHour:S.workStart;
+  const aS=parseISO(myStage.start).getTime()+aSh*3600000;
+  const aAe=stageActualEnd(myStage,mySub);
+  const aE=parseISO(aAe.date).getTime()+aAe.hour*3600000;
+  const list=_userBusyCache().get(userVal);
+  if(!list)return null;
+  for(const r of list){
+    if(r.stage.uid===selfUid)continue;
+    /* Пересечение полуоткрытых интервалов [aS,aE) и [r.sMs,r.eMs) */
+    if(aS<r.eMs&&r.sMs<aE)return{order:r.order,sub:r.sub,stage:r.stage};
   }
   return null;
 }
@@ -2897,6 +2935,9 @@ function addClientField(p,val,cb,draft){
    RENDER
 ══════════════════════════════════════════════ */
 function render(){
+  /* Кэш занятости сотрудников может устареть после любого render — данные
+     могли измениться. Сбрасываем; будет пересобран по первому запросу. */
+  invalidateUserBusyCache();
   const root=document.getElementById('root');
   /* Capture timeline viewport center as a DATE (using the previous render's
      non-linear scale), so we can restore the same date under the center after
@@ -3386,7 +3427,30 @@ function renderGantt(main){
     }
     xCur2+=dW_i;
   }
-  if(TODAY>=rng.min&&TODAY<=rng.max){const tl=el('div','g-today');tl.style.left=dX(TODAY,rng)+'px';body.appendChild(tl)}
+  /* Индикатор «сейчас» — вертикальная линия. Она показывает не просто
+     дату, а момент времени: внутри сегодняшней колонки смещение
+     пропорционально прошедшей доле дня. Линия обновляется каждые 30 сек
+     через интервал. Старый интервал чистим перед новым рендером, чтобы
+     не плодились зомби-таймеры. */
+  if(S._todayInterval){clearInterval(S._todayInterval);S._todayInterval=null}
+  if(TODAY>=rng.min&&TODAY<=rng.max){
+    const tl=el('div','g-today');body.appendChild(tl);
+    const tomorrow=calAdd(TODAY,1);
+    const dayStart=dX(TODAY,rng);
+    const dayEnd=tomorrow<=rng.max?dX(tomorrow,rng):dayStart+dayWidthFor(TODAY);
+    const dayWidth=Math.max(1,dayEnd-dayStart);
+    const updatePos=()=>{
+      const now=new Date();
+      /* Доля дня от 00:00 до 24:00 */
+      const ms=now.getHours()*3600000+now.getMinutes()*60000+now.getSeconds()*1000+now.getMilliseconds();
+      const frac=Math.max(0,Math.min(1,ms/86400000));
+      tl.style.left=(dayStart+dayWidth*frac)+'px';
+    };
+    updatePos();
+    /* Обновление раз в 30 секунд — достаточно для глазомерной точности
+       без лишних layout-операций. */
+    S._todayInterval=setInterval(updatePos,30000);
+  }
 
   const hasF=S.filterStages.length>0||S.filterStatus.length>0;
 
@@ -6317,8 +6381,13 @@ function renderModal(root){
         wd:Math.max(1,+m.csWd||1),
         note:m.csNote||'',
       };
-      /* Размещение нового этапа — сразу после исходного, на wd рабочих дней */
-      const startD=nw(parseISO(srcStage.end));
+      /* Размещение нового этапа — сразу после исходного, но не раньше
+         сегодняшнего рабочего дня. Если исходный этап уже закрылся в
+         прошлом, новый этап начинается с ближайшего рабочего дня от
+         сегодня. */
+      const today=nw(new Date(TODAY));
+      const afterSrc=nw(parseISO(srcStage.end));
+      const startD=afterSrc<today?today:afterSrc;
       const endD=awdFromDate(startD,sub.customStages[csId].wd);
       sub.stages.push({
         id:csId,
@@ -6365,7 +6434,7 @@ function renderModal(root){
           const usedElsewhere=m._slots.some((sv,si)=>si!==idx&&sv===v);
           if(usedElsewhere&&v!==val)return;
           /* Проверка занятости в другом этапе пересекающемся по времени */
-          const conflict=findUserConflict(v,stage.start,stage.end,stage.uid);
+          const conflict=findUserConflict(v,stage,sub,stage.uid);
           const op=document.createElement('option');op.value=v;
           const label=u.name+(u.role?' · '+u.role:'');
           if(conflict&&v!==val){
