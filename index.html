@@ -148,6 +148,11 @@ body{font-family:'Golos Text',sans-serif;background:var(--bg);color:var(--text);
 .lp-sub.open .chev{transform:rotate(90deg)}
 .sub-name{font-size:13px;color:var(--text);font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.1px}
 .lp-stage{display:flex;align-items:center;gap:5px;height:var(--g-stage-h,42px);padding:0 8px 0 44px;border-bottom:1px solid var(--border);cursor:pointer}
+/* Кастомный этап (cs_*) — слегка смещён вправо, плюс маленький
+   «branch»-маркер слева перед точкой статуса. Это визуально показывает,
+   что этап — производный (часть/доделка) от какого-то базового этапа. */
+.lp-stage-cs{padding-left:62px;position:relative}
+.lp-stage-cs::before{content:'↳';position:absolute;left:46px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:11px;line-height:1;pointer-events:none}
 .lp-stage:hover{background:var(--bg3)}
 .lp-purchasing{padding-left:30px;background:linear-gradient(to right,rgba(63,185,80,.05),transparent 40%)}
 .lp-purchasing .stage-lbl{font-size:13px;font-weight:500;letter-spacing:-.1px;margin-left:auto;text-align:right}
@@ -263,8 +268,14 @@ body{font-family:'Golos Text',sans-serif;background:var(--bg);color:var(--text);
 .gbar-conflict{outline:2px solid #f85149;outline-offset:-2px;box-shadow:0 0 0 1px rgba(248,81,73,.4) inset}
 .gbar-conflict::after{content:'⚠';position:absolute;top:-2px;right:2px;font-size:11px;color:#fff;background:#f85149;border-radius:3px;padding:0 3px;line-height:1.3;z-index:9;pointer-events:none;text-shadow:none}
 .g-rh{position:absolute;right:0;top:0;bottom:0;width:7px;cursor:ew-resize;background:rgba(255,255,255,.15);border-radius:0 5px 5px 0}
-.we-stripe{position:absolute;top:9px;height:24px;pointer-events:none;z-index:5;border-radius:3px;background:repeating-linear-gradient(45deg,rgba(255,255,255,.18) 0,rgba(255,255,255,.18) 3px,transparent 3px,transparent 6px)}
-.we-ol{position:absolute;top:9px;height:calc(var(--g-stage-h,42px) - 18px);min-height:14px;pointer-events:none;z-index:5;border-radius:5px;outline:2px dashed rgba(255,200,50,.5);outline-offset:-1px}
+.we-stripe{position:absolute;top:50%;transform:translateY(-50%);
+  height:calc(var(--g-stage-h,42px) - 12px);min-height:12px;
+  max-height:calc(var(--g-stage-h,42px) - 6px);
+  pointer-events:none;z-index:5;border-radius:5px;
+  background:repeating-linear-gradient(45deg,rgba(255,255,255,.18) 0,rgba(255,255,255,.18) 3px,transparent 3px,transparent 6px)}
+/* Раньше тут было правило .we-ol с пунктирной outline вокруг бара,
+   попавшего на выходные. Оно дублировало визуальный сигнал, который и так
+   даёт штриховка .we-stripe — поэтому убрано. */
 
 /* deadline inside order row */
 .dl-line{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed;pointer-events:none;z-index:5}
@@ -829,6 +840,9 @@ function sub2db(s,orderId,seq){return{
   id:s.id, order_id:orderId, name:s.name,
   qty:s.qty||{sheets:0,edgeMeters:0,parts:0}, seq,
   status:s.status==='done'?'done':'inprogress',
+  custom_stages:s.customStages||{},
+  title:s.title||'',
+  plan_pos:s.planPos||'',
 }}
 function stage2db(st,subId,seq){return{
   id:st.uid, suborder_id:subId, stage_id:st.id,
@@ -849,6 +863,9 @@ function db2ord(row,subs,stagesBySub){return{
   suborders:subs.slice().sort((a,b)=>a.seq-b.seq).map(s=>({
     id:s.id, name:s.name, qty:s.qty,
     status:s.status==='done'?'done':'inprogress',
+    customStages:s.custom_stages||{},
+    title:s.title||'',
+    planPos:s.plan_pos||'',
     stages:(stagesBySub[s.id]||[]).slice().sort((a,b)=>a.seq-b.seq).map(x=>({
       id:x.stage_id, uid:x.id,
       start:x.start_date, end:x.end_date,
@@ -1222,7 +1239,8 @@ async function reloadAll(){
 const STAGE_DEFS=[
   {id:'design',    lbl:'Проектирование',   color:'#58a6ff',wd:3},
   {id:'materials', lbl:'Закупка',          color:'#3fb950',wd:2},
-  {id:'cutting',   lbl:'Раскрой',          color:'#e3b341',wd:2},
+  {id:'cutting',       lbl:'Раскрой',           color:'#e3b341',wd:2},
+  {id:'cutting_paint', lbl:'Раскрой малярки',   color:'#f9c74f',wd:1},
   {id:'finishing', lbl:'Отделка',          color:'#f778ba',wd:1},
   {id:'painting',  lbl:'Покраска',         color:'#fb923c',wd:1},
   {id:'edging',    lbl:'Кромкование',      color:'#bc8cff',wd:1},
@@ -1240,7 +1258,69 @@ const EXCL_PROGRESS=new Set(['design','materials','qc','delivery','install']);
    ПРИМЕЧАНИЕ (INV-3): отделка и покраска УБРАНЫ из пререквизитов по
    решению пользователя — на практике сборка может вестись параллельно
    с отделочными работами по отдельным изделиям. */
-const ASSEMBLY_PREREQS=['materials','cutting','edging','drilling','led'];
+const ASSEMBLY_PREREQS=['materials','cutting','cutting_paint','edging','drilling','led'];
+/* ── CUSTOM STAGES ──────────────────────────────────────────────
+   Пользовательские этапы хранятся внутри каждого изделия (sub.customStages
+   как объект id→{lbl,color,wd}). Они НЕ участвуют в обратном
+   планировании (buildStagesBackwards) — пользователь сам ставит start/end
+   через drag-and-drop на Ганте. В sub.stages кастомные этапы выглядят
+   обычно: {id:'cs_xxx', status, start, end}, lbl/color/wd берутся через
+   getStageDef. */
+const CUSTOM_STAGE_PRESET_COLORS=[
+  '#58a6ff','#3fb950','#e3b341','#f778ba','#fb923c',
+  '#bc8cff','#a371f7','#22d3ee','#f9c74f','#fde047'
+];
+function isCustomStageId(id){return typeof id==='string'&&id.startsWith('cs_')}
+/* Эффективный «базовый» id для кастомного этапа — соответствует одному
+   из встроенных STAGE_DEFS. Используется в проверках SCHED, EXCL_PROGRESS,
+   ASSEMBLY_PREREQS: кастомный этап ведёт себя как его база. */
+function effectiveStageId(id,sub){
+  if(!isCustomStageId(id))return id;
+  if(sub&&sub.customStages&&sub.customStages[id])return sub.customStages[id].baseId||id;
+  /* Глобальный fallback — ищем во всех заказах */
+  if(typeof S!=='undefined'&&Array.isArray(S.orders)){
+    for(const o of S.orders){
+      for(const s of o.suborders){
+        if(s.customStages&&s.customStages[id])return s.customStages[id].baseId||id;
+      }
+    }
+  }
+  return id;
+}
+function getStageDef(stageId,sub){
+  if(isCustomStageId(stageId)){
+    const cs=sub&&sub.customStages&&sub.customStages[stageId];
+    if(cs){
+      /* Цвет и базовая длительность берутся у выбранного базового этапа,
+         название — пользовательское. wd может быть переопределён. */
+      const base=STAGE_DEFS.find(d=>d.id===cs.baseId);
+      return{
+        id:stageId,
+        lbl:cs.lbl||(base?base.lbl:'Доп. этап'),
+        color:base?base.color:(cs.color||'#888'),
+        wd:cs.wd||(base?base.wd:1),
+        baseId:cs.baseId||null,
+      };
+    }
+    return{id:stageId,lbl:'Доп. этап',color:'#888',wd:1,baseId:null};
+  }
+  return STAGE_DEFS.find(d=>d.id===stageId)||null;
+}
+/* Глобальный поиск без явного sub: ищет cs_* во всех изделиях всех заказов.
+   Используется в рендере и модалках, где явный sub не всегда под рукой. */
+function getStageDefAny(stageId){
+  if(isCustomStageId(stageId)){
+    if(typeof S!=='undefined'&&Array.isArray(S.orders)){
+      for(const o of S.orders){
+        for(const s of o.suborders){
+          if(s.customStages&&s.customStages[stageId])return getStageDef(stageId,s);
+        }
+      }
+    }
+    return getStageDef(stageId,null);
+  }
+  return STAGE_DEFS.find(d=>d.id===stageId)||null;
+}
 const KB_COLS=[
   {id:'new',         lbl:'Новые',             color:'#444c56'},
   {id:'inwork',      lbl:'В работе',          color:'#1f4a7a'},
@@ -1661,7 +1741,7 @@ function isBehindSchedule(order){
    STATE
 ══════════════════════════════════════════════ */
 /* ── Stage scheduling groups ── */
-const SCHED_CHAIN   = ['cutting','finishing','painting','edging','drilling','led']; // sequential within parallel block; led (подсветка) перед сборкой
+const SCHED_CHAIN   = ['cutting','cutting_paint','finishing','painting','edging','drilling','led']; // sequential within parallel block; cutting_paint сразу после основного раскроя
 const SCHED_PARALLEL= ['materials'];   // runs in parallel to CHAIN
 const SCHED_POST    = ['assembly','qc','packaging','delivery','install'];     // after parallel block
 const SCHED_PRE     = ['design'];                                             // before everything
@@ -1672,32 +1752,46 @@ function defaultDurH(def){
 }
 
 /* Build stages backwards from deadline with parallel support.
-   wdOverrides (optional): {stageId: wd} — use these working-day counts instead
-   of STAGE_DEFS.wd. orderStart (optional): if provided, design is anchored to
-   order.start (forward), and materials stretches from design.end to the start
-   of the POST block (assembly start). */
-function buildStagesBackwards(ids,deadlineStr,wdOverrides,orderStart){
+   customDefs (optional): {csId: {baseId, wd, lbl}} — кастомные этапы
+   встраиваются в SCHED_*-цепочки сразу ПОСЛЕ соответствующего base.
+   Если кастомных с одним base несколько — идут по порядку добавления. */
+function buildStagesBackwards(ids,deadlineStr,wdOverrides,orderStart,customDefs){
   const present=new Set(ids);
+  customDefs=customDefs||{};
+  /* expandGroup: разворачивает SCHED_*-список с учётом кастомных. */
+  const expandGroup=(group)=>{
+    const out=[];
+    group.forEach(baseId=>{
+      if(present.has(baseId))out.push(baseId);
+      Object.keys(customDefs).forEach(csId=>{
+        if(present.has(csId)&&customDefs[csId].baseId===baseId)out.push(csId);
+      });
+    });
+    return out;
+  };
   const dl=prevWork(parseISO(deadlineStr));
   const sd={};
   const wdOf=id=>{
     if(wdOverrides&&wdOverrides[id]!=null)return wdOverrides[id];
+    if(isCustomStageId(id)){
+      return (customDefs[id]&&customDefs[id].wd)||1;
+    }
     return STAGE_DEFS.find(s=>s.id===id).wd;
   };
   /* POST: install→delivery→packaging→qc→assembly backwards from deadline */
   let cursor=new Date(dl);
-  SCHED_POST.filter(id=>present.has(id)).reverse().forEach(id=>{
+  expandGroup(SCHED_POST).reverse().forEach(id=>{
     const w=wdOf(id);
     const end=new Date(cursor);
     const start=prevWork(subWD(cursor,w));
     sd[id]={start:dk(start),end:dk(end),wd:w};
     cursor=new Date(start);
   });
-  const blockEnd=new Date(cursor); // earliest POST start = where CHAIN/PARALLEL end
+  const blockEnd=new Date(cursor);
 
-  /* CHAIN: cutting→finishing→painting→edging→drilling backwards from blockEnd */
+  /* CHAIN backwards from blockEnd, с раскрытыми кастомными */
   let chainCursor=parseISO(blockEnd);
-  SCHED_CHAIN.filter(id=>present.has(id)).slice().reverse().forEach(id=>{
+  expandGroup(SCHED_CHAIN).reverse().forEach(id=>{
     const w=wdOf(id);
     const end=parseISO(chainCursor);
     const start=prevWork(subWD(chainCursor,w));
@@ -1742,14 +1836,37 @@ function buildStagesBackwards(ids,deadlineStr,wdOverrides,orderStart){
   }
 
   /* Build in canonical STAGE_DEFS order. durationHours seeded later in mkSub
-     / recomputeAllOrders, where materials gets its hour-precise duration. */
-  return STAGE_DEFS.filter(def=>present.has(def.id)).map(def=>{
+     / recomputeAllOrders, where materials gets its hour-precise duration.
+     Кастомные этапы (cs_*) тоже включаем — они уже спланированы в sd
+     внутри expandGroup. Каждый кастомный кладём сразу после своей базы. */
+  const out=[];
+  STAGE_DEFS.forEach(def=>{
+    if(!present.has(def.id))return;
     const w=wdOf(def.id);
     const d=sd[def.id]||{start:dk(dl),end:dk(awdFromDate(dl,w)),wd:w};
-    return{id:def.id,wd:d.wd,start:d.start,end:d.end,
+    out.push({id:def.id,wd:d.wd,start:d.start,end:d.end,
       status:'pending',note:'',startHour:S.workStart,durationHours:null,
-      ...(def.id==='materials'?{matDelivery:'',hwDelivery:''}:{})};
+      ...(def.id==='materials'?{matDelivery:'',hwDelivery:''}:{})});
+    /* Кастомные с base=def.id — вставляем сразу после */
+    Object.keys(customDefs).forEach(csId=>{
+      if(!present.has(csId))return;
+      if(customDefs[csId].baseId!==def.id)return;
+      const cw=wdOf(csId);
+      const cd=sd[csId]||{start:dk(dl),end:dk(awdFromDate(dl,cw)),wd:cw};
+      out.push({id:csId,wd:cd.wd,start:cd.start,end:cd.end,
+        status:'pending',note:'',startHour:S.workStart,durationHours:null});
+    });
   });
+  /* Кастомные с base, который сам не выбран — добавляем в конец */
+  Object.keys(customDefs).forEach(csId=>{
+    if(!present.has(csId))return;
+    if(out.some(s=>s.id===csId))return;
+    const cw=wdOf(csId);
+    const cd=sd[csId]||{start:dk(dl),end:dk(awdFromDate(dl,cw)),wd:cw};
+    out.push({id:csId,wd:cd.wd,start:cd.start,end:cd.end,
+      status:'pending',note:'',startHour:S.workStart,durationHours:null});
+  });
+  return out;
 }
 
 /* Forward builder (fallback when no deadline) */
@@ -2323,7 +2440,8 @@ function attemptKbMove(order,newColId){
 /* Default duration in hours for a stage, considering speed calculators for
    cutting/edging/drilling when sub.qty is non-zero. */
 function computeDefaultDurH(stageId,qty){
-  const def=STAGE_DEFS.find(s=>s.id===stageId);
+  const def=isCustomStageId(stageId)?getStageDefAny(stageId):STAGE_DEFS.find(s=>s.id===stageId);
+  if(!def)return 4; /* safe fallback */
   const lunch=Math.max(0,S.lunchEnd-S.lunchStart);
   const dayH=Math.max(1,S.workEnd-S.workStart-lunch);
   if(stageId==='cutting'&&qty?.sheets>0&&S.speeds.cutting.sheetsPerHour>0)
@@ -2565,7 +2683,7 @@ function calcOrderProgress(order){
       if(se<=NOW){doneH+=dh;}
       else if(ss<NOW){
         doneH+=(NOW-ss)/3600000;
-        activeStages.push({def:STAGE_DEFS.find(s=>s.id===stage.id),stage,sub});
+        activeStages.push({def:getStageDef(stage.id,sub),stage,sub});
       }
     });
   });
@@ -2657,7 +2775,8 @@ function getWorkDays(){
         let d=parseISO(st.start);const end=parseISO(st.end);
         while(d<end){if(!isWE(d))set.add(dk(d));d=calAdd(d,1)}
         /* add extra days for potential overflow (excluding lunch) */
-        const def=STAGE_DEFS.find(s=>s.id===st.id);
+        const def=getStageDefAny(st.id);
+        if(!def){d=calAdd(d,1);return}
         const sh=st.startHour!=null?st.startHour:S.workStart;
         const dh=st.durationHours||Math.max(1,def.wd*(S.workEnd-S.workStart));
         const lunchLen=S.lunchEnd-S.lunchStart;
@@ -3522,7 +3641,8 @@ function renderGantt(main){
       // stages
       (hasF?subVis:sub.stages).forEach(stage=>{
         if(hasF&&!stageVis(stage.id,stage.status))return;
-        const def=STAGE_DEFS.find(s=>s.id===stage.id);
+        const def=getStageDef(stage.id,sub);
+        if(!def)return; /* неизвестный stage id — пропускаем */
         const dh=computeStageDurH(stage,sub);
         const sh=stage.startHour!=null?stage.startHour:S.workStart;
         let segs=null;
@@ -3544,9 +3664,21 @@ function renderGantt(main){
         }
 
         // LP stage row
-        const lst=el('div','lp-stage');
+        const lst=el('div','lp-stage'+(isCustomStageId(stage.id)?' lp-stage-cs':''));
         const dot=el('div','sdot');dot.style.background=def.color;lst.appendChild(dot);
-        lst.appendChild(tx('span','slbl',def.lbl));
+        const lblEl=tx('span','slbl',def.lbl);
+        lst.appendChild(lblEl);
+        /* Иконка-подсказка: если у кастомного этапа есть примечание,
+           показываем ✎ — hover открывает текст. */
+        if(isCustomStageId(stage.id)){
+          const cs=sub.customStages&&sub.customStages[stage.id];
+          if(cs&&cs.note){
+            const noteIcon=tx('span','','✎');
+            noteIcon.style.cssText='font-size:10px;color:var(--text3);cursor:help;flex-shrink:0';
+            noteIcon.title=cs.note;
+            lst.appendChild(noteIcon);
+          }
+        }
         const sbBtn=el('button','stat-btn');
         const sb=tx('span','badge '+STAT_MAP[stage.status].cls,STAT_MAP[stage.status].lbl);
         sbBtn.appendChild(sb);
@@ -3563,6 +3695,29 @@ function renderGantt(main){
           }
         };
         lst.appendChild(sbBtn);
+        /* Кнопка «+» для быстрого создания дополнительного этапа на основе
+           этого этапа. Открывает модалку с полями имя/примечание/длит.
+           Доступно всем кроме readonly/purchaser. */
+        if(!_isViewer){
+          const addBtn=el('button','btn ic sm');
+          addBtn.textContent='+';
+          addBtn.title='Добавить дополнительный этап (часть/доделка)';
+          addBtn.style.cssText='font-size:12px;color:var(--text2);width:18px;height:18px;'
+            +'padding:0;border:1px dashed var(--border2);border-radius:50%;background:transparent;'
+            +'display:inline-flex;align-items:center;justify-content:center;line-height:1';
+          addBtn.onmouseenter=()=>{addBtn.style.borderColor=def.color;addBtn.style.color=def.color;addBtn.style.borderStyle='solid'};
+          addBtn.onmouseleave=()=>{addBtn.style.borderColor='var(--border2)';addBtn.style.color='var(--text2)';addBtn.style.borderStyle='dashed'};
+          addBtn.onclick=e=>{
+            e.stopPropagation();
+            openModal({
+              type:'addCustomStage',
+              orderId:order.id,subId:sub.id,
+              afterStageId:stage.id,
+              baseId:effectiveStageId(stage.id,sub),
+            });
+          };
+          lst.appendChild(addBtn);
+        }
         lst.onclick=()=>{
           if(_isViewer){
             openModal({type:'stageInfo',orderId:order.id,subId:sub.id,stageId:stage.id});
@@ -3668,7 +3823,9 @@ function renderGantt(main){
               d=calAdd(d,1);
             }
             if(inSp)addStripe(gr,dX(spS,rng),dX(d,rng),sx,sx+bw);
-            const ol=el('div','we-ol');ol.style.left=sx+'px';ol.style.width=bw+'px';gr.appendChild(ol);
+            /* Пунктирная outline .we-ol раньше рисовалась вокруг бара,
+               попавшего на выходные. Удалена — визуальный сигнал даёт
+               сама штриховка .we-stripe внутри бара. */
           }
         }
 
@@ -4342,7 +4499,7 @@ const STAGE_DEPS={
 };
 function validateStageStart(order,sub,stage){
   const stageStartHour=stage.startHour!=null?stage.startHour:S.workStart;
-  const stageLbl=id=>STAGE_DEFS.find(s=>s.id===id).lbl;
+  const stageLbl=id=>{const d=getStageDefAny(id);return d?d.lbl:id};
   const hard=msg=>({type:'hard',message:msg});
   const soft=msg=>({type:'soft',message:msg});
 
@@ -4771,12 +4928,19 @@ function renderModal(root){
     const sub=order.suborders.find(s=>s.id===m.subId);
     if(!m._init){
       m.subName=sub.name;m.sel=sub.stages.map(s=>s.id);
+      m.subTitle=sub.title||'';
+      m.subPlanPos=sub.planPos||'';
       m.qSheets=sub.qty?.sheets||0;m.qEdge=sub.qty?.edgeMeters||0;m.qParts=sub.qty?.parts||0;
       m.subStatus=sub.status==='done'?'done':'inprogress';
+      /* Копия пользовательских этапов в working state, чтобы Отмена
+         не оставила добавленные/удалённые этапы в БД. */
+      m.customStages=JSON.parse(JSON.stringify(sub.customStages||{}));
       m._init=true;
     }
     modal.appendChild(tx('div','modal-title','Изделие: '+sub.name));
-    addField(modal,'Название изделия','text',m.subName,v=>m.subName=v);
+    addField(modal,'Номер изделия','text',m.subName,v=>m.subName=v);
+    addField(modal,'Название изделия','text',m.subTitle,v=>m.subTitle=v);
+    addField(modal,'Позиция в плане','text',m.subPlanPos,v=>m.subPlanPos=v);
 
     /* Статус изделия — ручной переключатель «В работе / Готово».
        Отражается в LP в виде цветного кружочка перед именем изделия. */
@@ -4830,21 +4994,141 @@ function renderModal(root){
       grid.appendChild(item);
     });
     modal.appendChild(grid);
+    /* === Дополнительные (кастомные) этапы ===
+       Создаются пользователем, имеют произвольное название/цвет/длительность.
+       В обратном планировании не участвуют — добавляются в sub.stages с
+       начальным размещением (start = order.start, end = +wd рабочих дней)
+       и далее двигаются вручную через drag на Ганте. */
+    {
+      const cstWrap=el('div','');
+      cstWrap.style.cssText='margin-top:14px;padding:10px;background:var(--bg);'
+        +'border:1px solid var(--border);border-radius:var(--r)';
+      const cstHead=el('div','');
+      cstHead.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:8px';
+      const cstTtl=tx('span','','✦ Дополнительные этапы');
+      cstTtl.style.cssText='font-size:12px;font-weight:600;flex:1';
+      cstHead.appendChild(cstTtl);
+      const addCst=el('button','btn sm');addCst.type='button';
+      addCst.textContent='+ Добавить';
+      addCst.style.fontSize='11px';
+      addCst.onclick=()=>{
+        const id='cs_'+_id();
+        m.customStages[id]={lbl:'',baseId:'cutting',wd:STAGE_DEFS.find(d=>d.id==='cutting').wd};
+        m.sel=[...m.sel,id];
+        renderModal(root);
+      };
+      cstHead.appendChild(addCst);
+      cstWrap.appendChild(cstHead);
+      const ids=Object.keys(m.customStages);
+      if(ids.length===0){
+        const empty=tx('div','','Дополнительный этап ведёт себя как выбранный базовый: тот же цвет, та же группа в обратном планировании (например «Раскрой», «Присадка»). Название может быть произвольным.');
+        empty.style.cssText='font-size:11px;color:var(--text3);line-height:1.4';
+        cstWrap.appendChild(empty);
+      }
+      ids.forEach(id=>{
+        const cs=m.customStages[id];
+        if(!cs.baseId)cs.baseId='cutting';
+        const baseDef=STAGE_DEFS.find(d=>d.id===cs.baseId)||STAGE_DEFS[0];
+        const row=el('div','');
+        row.style.cssText='display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap';
+        /* Цветной индикатор-кнопка — клик открывает выпадающий список
+           базовых этапов. Сам <select> размещён абсолютно поверх кружка
+           с opacity:0 — нативный выпадающий список появляется ровно под
+           индикатором. Это безопаснее ручного popup-меню. */
+        const picker=el('div','');
+        picker.style.cssText='position:relative;width:22px;height:22px;flex-shrink:0';
+        const dot=el('span','');
+        dot.style.cssText='position:absolute;inset:0;border-radius:50%;'
+          +'background:'+baseDef.color+';cursor:pointer;'
+          +'box-shadow:0 0 0 2px var(--bg2);'
+          +'transition:transform .12s,filter .12s';
+        dot.title='Выбрать базовый этап (текущий: '+baseDef.lbl+')';
+        const sel=document.createElement('select');
+        sel.style.cssText='position:absolute;inset:0;width:100%;height:100%;'
+          +'opacity:0;cursor:pointer;border:0;background:transparent;font:inherit;-webkit-appearance:none;appearance:none';
+        sel.title='Базовый этап';
+        STAGE_DEFS.forEach(def=>{
+          const opt=document.createElement('option');opt.value=def.id;opt.textContent=def.lbl;
+          if(def.id===cs.baseId)opt.selected=true;
+          sel.appendChild(opt);
+        });
+        sel.onchange=e=>{
+          cs.baseId=e.target.value;
+          const nb=STAGE_DEFS.find(d=>d.id===cs.baseId);
+          if(nb)cs.wd=nb.wd;
+          renderModal(root);
+        };
+        sel.onmouseenter=()=>{dot.style.transform='scale(1.1)';dot.style.filter='brightness(1.15)'};
+        sel.onmouseleave=()=>{dot.style.transform='';dot.style.filter=''};
+        picker.appendChild(dot);picker.appendChild(sel);
+        row.appendChild(picker);
+        /* Название */
+        const ni=document.createElement('input');ni.type='text';ni.value=cs.lbl;
+        ni.placeholder=baseDef.lbl;
+        ni.style.cssText='flex:1;min-width:120px;background:var(--bg2);border:1px solid var(--border2);border-radius:6px;padding:4px 8px;font-size:12px;color:var(--text);outline:none';
+        ni.oninput=e=>{cs.lbl=e.target.value};
+        row.appendChild(ni);
+        /* Длительность в р. д. */
+        const wd=document.createElement('input');wd.type='number';wd.min=1;wd.max=20;wd.value=cs.wd;
+        wd.className='wd-num';wd.style.width='44px';
+        wd.title='Длительность в рабочих днях';
+        wd.oninput=e=>{cs.wd=Math.max(1,Math.min(20,+e.target.value||1))};
+        row.appendChild(wd);
+        const wdLbl=tx('span','','р.д.');wdLbl.style.cssText='font-size:11px;color:var(--text2)';
+        row.appendChild(wdLbl);
+        /* Удалить */
+        const del=el('button','btn ic sm');del.type='button';del.textContent='✕';
+        del.title='Удалить этап';del.style.color='var(--danger)';
+        del.onclick=()=>{
+          delete m.customStages[id];
+          m.sel=m.sel.filter(x=>x!==id);
+          renderModal(root);
+        };
+        row.appendChild(del);
+        cstWrap.appendChild(row);
+        /* Поле примечания — отдельной строкой под основным рядом параметров.
+           Сюда вписывается контекст: «доделка», «вторая партия», что
+           именно делается в этом этапе. Показывается в tooltip бара на
+           Ганте и в модалке этапа. */
+        const noteRow=el('div','');
+        noteRow.style.cssText='display:flex;align-items:center;gap:6px;margin:4px 0 8px 28px';
+        const noteLbl=tx('span','','✎');noteLbl.style.cssText='font-size:11px;color:var(--text3);flex-shrink:0';
+        noteRow.appendChild(noteLbl);
+        const noteI=document.createElement('input');noteI.type='text';
+        noteI.value=cs.note||'';
+        noteI.placeholder='Примечание (например: «доделать после контроля», «вторая партия»)';
+        noteI.style.cssText='flex:1;background:var(--bg2);border:1px solid var(--border2);border-radius:6px;padding:3px 8px;font-size:11px;color:var(--text2);outline:none';
+        noteI.oninput=e=>{cs.note=e.target.value};
+        noteRow.appendChild(noteI);
+        cstWrap.appendChild(noteRow);
+      });
+      modal.appendChild(cstWrap);
+    }
     const delSub=el('button','btn dn');delSub.style.marginTop='12px';delSub.textContent='🗑 Удалить это изделие';
     delSub.onclick=()=>{if(confirm('Удалить изделие «'+sub.name+'»?')){order.suborders=order.suborders.filter(s=>s.id!==sub.id);closeModal()}};
     modal.appendChild(delSub);
     addFooter(modal,()=>{
       sub.name=m.subName||'Изделие';
+      sub.title=m.subTitle||'';
+      sub.planPos=m.subPlanPos||'';
       sub.status=m.subStatus==='done'?'done':'inprogress';
       const oldQty=sub.qty||{};
       const newQty={sheets:+m.qSheets||0,edgeMeters:+m.qEdge||0,parts:+m.qParts||0};
       const qtyChanged=oldQty.sheets!==newQty.sheets||oldQty.edgeMeters!==newQty.edgeMeters||oldQty.parts!==newQty.parts;
       sub.qty=newQty;
       const ids=STAGE_DEFS.filter(x=>m.sel.includes(x.id)).map(x=>x.id);
+      const customIds=m.sel.filter(id=>isCustomStageId(id));
+      const allIds=[...ids,...customIds];
       const dlDate=deadlineDate(order.deadline,order.start);
       const dlStr=dlDate?dk(dlDate):null;
       const exMap=Object.fromEntries(sub.stages.map(s=>[s.id,s]));
-      const newStages=dlStr?buildStagesBackwards(ids,dlStr,undefined,order.start):buildStagesForward(ids,order.start);
+      /* Сохраняем кастомные определения в sub до пересоздания stages */
+      sub.customStages=JSON.parse(JSON.stringify(m.customStages||{}));
+      /* Кастомные теперь участвуют в обратном планировании: они
+         встраиваются в SCHED_*-цепочки своего базового этапа. */
+      const newStages=dlStr
+        ?buildStagesBackwards(allIds,dlStr,undefined,order.start,sub.customStages)
+        :buildStagesForward(allIds,order.start);
       sub.stages=newStages.map(s=>{
         const ex=exMap[s.id];
         /* For calculator-driven stages, recompute durationHours from new qty
@@ -4884,7 +5168,7 @@ function renderModal(root){
     const order=S.orders.find(o=>o.id===m.orderId);
     const sub=order.suborders.find(s=>s.id===m.subId);
     const stage=sub.stages.find(s=>s.id===m.stageId);
-    const def=STAGE_DEFS.find(s=>s.id===m.stageId);
+    const def=getStageDef(m.stageId,sub);if(!def){closeModal();return}
     const t=el('div','modal-title');
     const dot=el('span','');dot.style.cssText=`display:inline-block;width:10px;height:10px;border-radius:50%;background:${def.color};margin-right:7px;vertical-align:middle`;
     t.appendChild(dot);t.appendChild(tx('span','',def.lbl));modal.appendChild(t);
@@ -4914,7 +5198,7 @@ function renderModal(root){
     const order=S.orders.find(o=>o.id===m.orderId);
     const sub=order.suborders.find(s=>s.id===m.subId);
     const stage=sub.stages.find(s=>s.id===m.stageId);
-    const def=STAGE_DEFS.find(s=>s.id===m.stageId);
+    const def=getStageDef(m.stageId,sub);if(!def){closeModal();return}
     const t=el('div','modal-title');
     const dot=el('span','');dot.style.cssText=`display:inline-block;width:10px;height:10px;border-radius:50%;background:${def.color};margin-right:7px;vertical-align:middle`;
     t.appendChild(dot);t.appendChild(tx('span','',def.lbl));modal.appendChild(t);
@@ -5829,7 +6113,8 @@ function renderModal(root){
     const sub=order&&order.suborders.find(s=>s.id===m.subId);
     const stage=sub&&sub.stages.find(x=>x.id===m.stageId);
     if(!order||!sub||!stage){closeModal();return}
-    const def=STAGE_DEFS.find(d=>d.id===stage.id);
+    const def=getStageDef(stage.id,sub);
+    if(!def){closeModal();return}
     const st=STAT_MAP[stage.status]||STAT_MAP.pending;
     const dh=computeStageDurH(stage,sub);
     const sh=stage.startHour!=null?stage.startHour:S.workStart;
@@ -5973,7 +6258,7 @@ function renderModal(root){
         stageBadge.style.cssText+=';background:rgba(63,185,80,.12);border:1px solid #3fb950;color:#3fb950';
         stageBadge.textContent='✓ Готово';
       }else if(activeStage){
-        const def=STAGE_DEFS.find(d=>d.id===activeStage.id);
+        const def=getStageDef(activeStage.id,sub);
         const c=def?.color||'var(--accent)';
         stageBadge.style.cssText+=';background:'+c+'20;border:1px solid '+c+';color:'+c;
         const sdot=el('span','');
@@ -5995,11 +6280,65 @@ function renderModal(root){
     modal.appendChild(ftr);
   }
 
+  /* ── ADD CUSTOM STAGE ──
+     Открывается из LP кликом на «+» рядом с любым этапом. Создаёт
+     кастомный этап (cs_*) с base = baseId переданного этапа. Размещение
+     по времени — сразу после этапа-источника, длительность задаёт юзер. */
+  else if(m.type==='addCustomStage'){
+    const order=S.orders.find(o=>o.id===m.orderId);
+    const sub=order&&order.suborders.find(s=>s.id===m.subId);
+    const srcStage=sub&&sub.stages.find(x=>x.id===m.afterStageId);
+    if(!order||!sub||!srcStage){closeModal();return}
+    const baseDef=STAGE_DEFS.find(d=>d.id===m.baseId)||STAGE_DEFS[0];
+    if(!m._init){
+      m.csLbl=baseDef.lbl+' (доделка)';
+      m.csNote='';
+      m.csWd=1;
+      m._init=true;
+    }
+    const t=el('div','modal-title');
+    const tdot=el('span','');
+    tdot.style.cssText='display:inline-block;width:10px;height:10px;border-radius:50%;background:'+baseDef.color+';margin-right:8px;vertical-align:middle';
+    t.appendChild(tdot);
+    t.appendChild(document.createTextNode('Доп. этап на основе «'+baseDef.lbl+'»'));
+    modal.appendChild(t);
+    const hint=tx('div','','Будет создан отдельный бар после текущего этапа. Цвет — как у базового, поведение в планировании — тоже.');
+    hint.style.cssText='font-size:11px;color:var(--text3);margin-bottom:10px;line-height:1.4';
+    modal.appendChild(hint);
+    addField(modal,'Название','text',m.csLbl,v=>m.csLbl=v);
+    addField(modal,'Примечание','text',m.csNote,v=>m.csNote=v);
+    addField(modal,'Длительность (рабочих дней)','number',m.csWd,v=>m.csWd=Math.max(1,+v||1),{min:1,max:30});
+    addFooter(modal,()=>{
+      const csId='cs_'+_id();
+      sub.customStages=sub.customStages||{};
+      sub.customStages[csId]={
+        lbl:m.csLbl||baseDef.lbl,
+        baseId:m.baseId,
+        wd:Math.max(1,+m.csWd||1),
+        note:m.csNote||'',
+      };
+      /* Размещение нового этапа — сразу после исходного, на wd рабочих дней */
+      const startD=nw(parseISO(srcStage.end));
+      const endD=awdFromDate(startD,sub.customStages[csId].wd);
+      sub.stages.push({
+        id:csId,
+        wd:sub.customStages[csId].wd,
+        start:dk(startD),end:dk(endD),
+        status:'pending',note:'',
+        startHour:S.workStart,durationHours:null,
+        uid:_id(),
+        assignees:[],
+        deliveries:[],
+      });
+      closeModal();
+    },'Создать этап');
+  }
+
   else if(m.type==='editStageHour'){
     const order=S.orders.find(o=>o.id===m.orderId);
     const sub=order.suborders.find(s=>s.id===m.subId);
     const stage=sub.stages.find(s=>s.id===m.stageId);
-    const def=STAGE_DEFS.find(s=>s.id===m.stageId);
+    const def=getStageDef(m.stageId,sub);if(!def){closeModal();return}
     const t=el('div','modal-title');
     const dot=el('span','');dot.style.cssText=`display:inline-block;width:10px;height:10px;border-radius:50%;background:${def.color};margin-right:7px;vertical-align:middle`;
     t.appendChild(dot);t.appendChild(tx('span','',def.lbl+' — часы'));modal.appendChild(t);
@@ -6031,7 +6370,7 @@ function renderModal(root){
           const label=u.name+(u.role?' · '+u.role:'');
           if(conflict&&v!==val){
             op.disabled=true;
-            const stDef=STAGE_DEFS.find(d=>d.id===conflict.stage.id);
+            const stDef=getStageDefAny(conflict.stage.id);
             const stLbl=stDef?stDef.lbl:conflict.stage.id;
             op.textContent=label+' — занят: '+stLbl+' / '+conflict.order.name;
           }else{
@@ -7258,7 +7597,12 @@ function renderModal(root){
    - dayInput: used in day mode (updates рабочих дней input)
 ══════════════════════════════════════════════ */
 function appendCalc(parent, stageId, hourSlider, dayInput, hourValLabel, orderQty){
-  if(!['cutting','edging','drilling'].includes(stageId))return;
+  /* Для кастомных этапов используем базовый id — калькулятор есть только
+     у cutting/edging/drilling, и cs_X с base=cutting должен использовать
+     тот же калькулятор. */
+  const effId=isCustomStageId(stageId)?effectiveStageId(stageId,null):stageId;
+  if(!['cutting','edging','drilling'].includes(effId))return;
+  stageId=effId;
 
   const box=el('div','calc-box');
   const title=el('div','calc-title');
