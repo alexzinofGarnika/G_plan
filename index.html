@@ -232,8 +232,8 @@ body{font-family:'Golos Text',sans-serif;background:var(--bg);color:var(--text);
 /* Gantt timeline */
 .tl-head{height:58px;position:sticky;top:0;z-index:15;background:var(--bg2);border-bottom:1px solid var(--border)}
 .tl-inner{position:relative;height:58px}
-.mcell{position:absolute;top:0;height:28px;display:flex;align-items:center;padding-left:7px;font-size:11px;font-weight:600;color:var(--text2);border-left:1px solid var(--border);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-transform:uppercase;letter-spacing:.4px}
-.dcell{position:absolute;top:28px;height:30px;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text3);border-left:1px solid var(--border);font-family:'JetBrains Mono',monospace}
+.mcell{position:absolute;top:0;height:28px;display:flex;align-items:center;padding-left:7px;font-size:11px;font-weight:600;color:var(--text);border-left:1px solid var(--border);font-family:'JetBrains Mono',monospace;white-space:nowrap;overflow:hidden;text-transform:uppercase;letter-spacing:.4px}
+.dcell{position:absolute;top:28px;height:30px;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text);border-left:1px solid var(--border);font-family:'JetBrains Mono',monospace}
 .dcell.we{color:var(--danger);opacity:.7}.dcell.tod{color:var(--accent);font-weight:600}
 .dcell.sat-toggle:hover{background:rgba(88,166,255,.12);color:var(--accent)}
 .dcell.sat-on{color:var(--success);opacity:1;background:rgba(63,185,80,.08)}
@@ -1271,6 +1271,19 @@ const CUSTOM_STAGE_PRESET_COLORS=[
   '#bc8cff','#a371f7','#22d3ee','#f9c74f','#fde047'
 ];
 function isCustomStageId(id){return typeof id==='string'&&id.startsWith('cs_')}
+/* Следующий свободный авто-номер изделия (формат «01», «02», ...).
+   Существующие имена (в том числе ручные «Шкаф-купе») не вытесняются —
+   подбираем первый незанятый двузначный номер. */
+function nextSubNumber(existingNames){
+  const set=new Set((existingNames||[]).map(x=>String(x||'').trim()));
+  let n=1;
+  while(true){
+    const c=String(n).padStart(2,'0');
+    if(!set.has(c))return c;
+    n++;
+    if(n>9999)return c; /* предохранитель */
+  }
+}
 /* Эффективный «базовый» id для кастомного этапа — соответствует одному
    из встроенных STAGE_DEFS. Используется в проверках SCHED, EXCL_PROGRESS,
    ASSEMBLY_PREREQS: кастомный этап ведёт себя как его база. */
@@ -1921,7 +1934,24 @@ function buildStagesForward(ids,startStr){
 }
 let _uid=100;
 function mkSub(name,stageIds,startStr,qty,deadlineStr){
-  const stages=deadlineStr?buildStagesBackwards(stageIds,deadlineStr,undefined,startStr):buildStagesForward(stageIds,startStr);
+  /* Бары новых изделий не должны располагаться в прошлом. Логика:
+     1) Если есть дедлайн — планируем backward, но если самая ранняя
+        дата этапа окажется раньше сегодня (короткий дедлайн / опоздание),
+        переключаемся на forward от сегодня (бары уйдут вправо за дедлайн —
+        это разумный визуальный сигнал, что цель уже нереалистична).
+     2) Без дедлайна — forward от max(startStr, TODAY). */
+  const todayKey=dk(TODAY);
+  let stages;
+  if(deadlineStr){
+    stages=buildStagesBackwards(stageIds,deadlineStr,undefined,startStr);
+    const earliest=stages.reduce((m,s)=>s.start<m?s.start:m,stages[0]?.start||todayKey);
+    if(earliest<todayKey){
+      stages=buildStagesForward(stageIds,todayKey);
+    }
+  }else{
+    const eff=startStr<todayKey?todayKey:startStr;
+    stages=buildStagesForward(stageIds,eff);
+  }
   const sub={id:_id(),name,stages,qty:qty||{sheets:0,edgeMeters:0,parts:0}};
   /* Seed durationHours: materials gets the actual span from start..end (it
      stretches across the whole pre-assembly window); others use the calculator. */
@@ -2622,7 +2652,8 @@ function findConflicts(){
         const key=order.id+':'+sub.id+':'+stage.id;
         const label=order.name+' — '+sub.name;
         const time=stage.start+' '+fmtHM(sh)+' – '+ae.date+' '+fmtHM(ae.hour);
-        (byStage[stage.id]=byStage[stage.id]||[]).push({key,sMs,eMs,label,time});
+        const assignees=Array.isArray(stage.assignees)?stage.assignees:[];
+        (byStage[stage.id]=byStage[stage.id]||[]).push({key,sMs,eMs,label,time,assignees});
       });
     });
   });
@@ -2669,13 +2700,23 @@ function findConflicts(){
       });
       return;
     }
-    /* Остальные этапы — обычная попарная проверка пересечения */
+    /* Остальные этапы — попарная проверка пересечения времени И
+       пересечения ответственных. Логика: одновременные этапы одного типа
+       (например, два «Монтажа») не конфликтуют, если на них назначены
+       РАЗНЫЕ люди — это реально выполнимо двумя бригадами. Конфликт
+       сохраняется только при общих ответственных. Если хоть у одного из
+       пары ответственных нет — считаем конфликтом (неопределённость:
+       нельзя гарантировать, что не назначат того же сотрудника). */
     for(let i=0;i<arr.length;i++){
       for(let j=i+1;j<arr.length;j++){
-        if(arr[i].sMs<arr[j].eMs&&arr[j].sMs<arr[i].eMs){
-          (out[arr[i].key]=out[arr[i].key]||[]).push({label:arr[j].label,time:arr[j].time});
-          (out[arr[j].key]=out[arr[j].key]||[]).push({label:arr[i].label,time:arr[i].time});
-        }
+        if(!(arr[i].sMs<arr[j].eMs&&arr[j].sMs<arr[i].eMs))continue;
+        const aA=arr[i].assignees,bA=arr[j].assignees;
+        const noAssignA=aA.length===0,noAssignB=bA.length===0;
+        const shareUser=aA.some(x=>bA.includes(x));
+        const isConflict=(noAssignA||noAssignB)?true:shareUser;
+        if(!isConflict)continue;
+        (out[arr[i].key]=out[arr[i].key]||[]).push({label:arr[j].label,time:arr[j].time});
+        (out[arr[j].key]=out[arr[j].key]||[]).push({label:arr[i].label,time:arr[i].time});
       }
     }
   });
@@ -3620,7 +3661,10 @@ function renderGantt(main){
           byDate.forEach((items,dateKey)=>{
             const dd=parseISO(dateKey);
             const stack=el('div','g-purch-stack');
-            stack.style.left=dX(dd,rng)+'px';
+            /* Маркер поставки — в середину колонки своего дня. К началу
+               дня добавляем половину ширины колонки. Translate-X у самого
+               маркера компенсирует его собственную ширину (см. CSS). */
+            stack.style.left=(dX(dd,rng)+dayWidthFor(dd)/2)+'px';
             items.forEach(d=>stack.appendChild(buildMarker(d)));
             if(items.length>1){
               stack.title='Поставок в этот день: '+items.length+' — наведите, чтобы выбрать';
@@ -3902,7 +3946,7 @@ function renderGantt(main){
             const md=new Date(date);
             if(md<rng.min||md>rng.max)return;
             const mk=el('div','delivery-marker '+cls);
-            mk.style.left=dX(md,rng)+'px';mk.title=tip+fmtF(date);
+            mk.style.left=(dX(md,rng)+dayWidthFor(md)/2)+'px';mk.title=tip+fmtF(date);
             gr.appendChild(mk);
           });
         }
@@ -4006,7 +4050,11 @@ function addLPSub(lpR,order,sub,scoll){
     +'background:'+dotColor+';flex-shrink:0;margin-right:4px';
   dot.title=st==='done'?'Изделие готово':'Изделие в работе';
   ls.appendChild(dot);
-  ls.appendChild(tx('span','chev','▶'));ls.appendChild(tx('span','sub-name',sub.name+' ('+sub.stages.length+' эт.)'));
+  ls.appendChild(tx('span','chev','▶'));
+  /* В LP отображаем только номер и название изделия; счётчик этапов
+     убран — его видно в редакторе изделия и в самой строке этапов. */
+  const subLabel=sub.title?sub.name+' · '+sub.title:sub.name;
+  ls.appendChild(tx('span','sub-name',subLabel));
   /* Кнопка настройки изделия скрыта для ролей без права менять изделия */
   if(!S.isReadonly&&!S.isPurchaser){
     const sbe=el('button','btn ic sm');sbe.textContent='⚙';sbe.onclick=e=>{e.stopPropagation();openModal({type:'editSub',orderId:order.id,subId:sub.id})};
@@ -4863,11 +4911,22 @@ function renderModal(root){
     });
     modal.appendChild(subList);
     const addSubBtn=el('button','btn sm');addSubBtn.textContent='+ Добавить изделие';
-    addSubBtn.onclick=()=>{m.subs.push({name:'Новое изделие',sel:['design','assembly','delivery'],qty:{sheets:0,edgeMeters:0,parts:0}});renderModal(root)};
+    addSubBtn.onclick=()=>{
+      const next=nextSubNumber(m.subs.map(s=>s.name));
+      m.subs.push({name:next,sel:['design','assembly','delivery'],qty:{sheets:0,edgeMeters:0,parts:0}});
+      renderModal(root);
+    };
     modal.appendChild(addSubBtn);
 
     addFooter(modal,()=>{
       if(!m.name.trim()){alert('Введите название');return}
+      /* Проверка уникальности номеров изделий в этом заказе. */
+      const subNames=m.subs.filter(s=>s.sel.length>0).map(s=>(s.name||'').trim()).filter(Boolean);
+      const dupes=subNames.filter((n,i)=>subNames.indexOf(n)!==i);
+      if(dupes.length){
+        alert('Номера изделий должны быть уникальными. Повторяются: '+[...new Set(dupes)].join(', '));
+        return;
+      }
       const dld=getDLPreview();
       if(!dld){const b=el('div','err-box');b.textContent='⚠ Укажите дедлайн';dlSt.innerHTML='';dlSt.appendChild(b);return}
       if(dld<parseISO(m.start)){const b=el('div','err-box');b.textContent='⚠ Дедлайн раньше даты начала';dlSt.innerHTML='';dlSt.appendChild(b);return}
@@ -4923,14 +4982,40 @@ function renderModal(root){
     modal.appendChild(tx('label','flbl','Изделия'));
     order.suborders.forEach(sub=>{
       const si=el('div','sub-item');
-      si.appendChild(tx('span','sub-item-name',sub.name+' ('+sub.stages.length+' эт.)'));
+      /* Левая часть: «01 · Шкаф-купе  (5 эт.)» — номер и название изделия;
+         если название не задано, показываем только номер. */
+      const left=el('div','');
+      left.style.cssText='flex:1;display:flex;align-items:baseline;gap:8px;min-width:0';
+      const numEl=tx('span','',sub.name||'—');
+      numEl.style.cssText='font-weight:600;font-size:13px;color:var(--text);flex-shrink:0';
+      left.appendChild(numEl);
+      if(sub.title){
+        const ttlEl=tx('span','',sub.title);
+        ttlEl.style.cssText='font-weight:600;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0';
+        left.appendChild(ttlEl);
+      }
+      const stagesEl=tx('span','','('+sub.stages.length+' эт.)');
+      stagesEl.style.cssText='font-size:11px;color:var(--text3);flex-shrink:0;margin-left:auto;padding-left:8px';
+      left.appendChild(stagesEl);
+      si.appendChild(left);
+      /* Правая часть: позиция в плане (если задана) */
+      if(sub.planPos){
+        const planEl=tx('span','',sub.planPos);
+        planEl.style.cssText='font-size:11px;color:var(--text2);background:var(--bg);'
+          +'border:1px solid var(--border2);border-radius:6px;padding:2px 8px;flex-shrink:0;margin:0 8px';
+        planEl.title='Позиция в плане';
+        si.appendChild(planEl);
+      }
       const eb=el('button','btn ic sm');eb.textContent='⚙';
       eb.onclick=()=>openModal({type:'editSub',orderId:order.id,subId:sub.id,_parent:S.modal});si.appendChild(eb);
       modal.appendChild(si);
     });
     const addS=el('button','btn sm');addS.style.marginTop='6px';addS.textContent='+ Добавить изделие';
     addS.onclick=()=>{
-      const sub=mkSub('Новое изделие',['design','assembly','delivery'],order.start);
+      /* Авто-номер: первый свободный двузначный номер. Существующие
+         ручные имена («Шкаф», «А-15») не вытесняются и пропускаются. */
+      const next=nextSubNumber(order.suborders.map(s=>s.name));
+      const sub=mkSub(next,['design','assembly','delivery'],order.start);
       order.suborders.push(sub);renderModal(root);
     };
     modal.appendChild(addS);
@@ -5172,7 +5257,18 @@ function renderModal(root){
     delSub.onclick=()=>{if(confirm('Удалить изделие «'+sub.name+'»?')){order.suborders=order.suborders.filter(s=>s.id!==sub.id);closeModal()}};
     modal.appendChild(delSub);
     addFooter(modal,()=>{
-      sub.name=m.subName||'Изделие';
+      /* Проверка уникальности номера в пределах заказа. Сравнение по
+         тримованной строке, чтобы случайный пробел не считался отличием.
+         Пустое имя допускается — превращается в дефолтное «Изделие». */
+      const newName=(m.subName||'').trim();
+      if(newName){
+        const clash=order.suborders.some(s=>s.id!==sub.id&&(s.name||'').trim()===newName);
+        if(clash){
+          alert('Изделие с номером «'+newName+'» уже есть в этом заказе. Введите другой номер.');
+          return;
+        }
+      }
+      sub.name=newName||'Изделие';
       sub.title=m.subTitle||'';
       sub.planPos=m.subPlanPos||'';
       sub.status=m.subStatus==='done'?'done':'inprogress';
@@ -5941,9 +6037,17 @@ function renderModal(root){
     delBox.style.cssText='background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:12px;margin-bottom:14px;display:flex;flex-direction:column;gap:10px';
     const tgRow=el('div','');tgRow.style.cssText='display:flex;align-items:center;gap:10px';
     const tgLbl=tx('span','','✓ Доставлено');tgLbl.style.cssText='font-weight:500;flex:1';
-    /* toggle */
-    const tg=el('button','');tg.style.cssText='width:44px;height:24px;border-radius:99px;border:none;cursor:pointer;position:relative;transition:background .15s;'+
-      'background:'+(d.delivered?'var(--success)':'var(--bg3)');
+    /* toggle. Класс ro-keep — кнопка доступна и для роли «монитор», иначе
+       универсальный read-only фильтр её отключит, и поставить отметку
+       будет нельзя. Снять отметку «Доставлено» не могут ни монитор, ни
+       начальник производства — это требует более высокой роли. */
+    const lowerRoleLocked=d.delivered&&(S.isReadonly||S.isProdChief);
+    const tg=el('button','ro-keep');
+    tg.style.cssText='width:44px;height:24px;border-radius:99px;border:none;position:relative;transition:background .15s;'
+      +'cursor:'+(lowerRoleLocked?'not-allowed':'pointer')+';'
+      +(lowerRoleLocked?'opacity:.75;':'')
+      +'background:'+(d.delivered?'var(--success)':'var(--bg3)');
+    if(lowerRoleLocked)tg.title='Снять отметку «Доставлено» может только администратор или менеджер';
     const knob=el('div','');knob.style.cssText='position:absolute;top:2px;left:'+(d.delivered?'22px':'2px')+';width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s';
     tg.appendChild(knob);
     tgRow.appendChild(tgLbl);tgRow.appendChild(tg);
@@ -5960,8 +6064,11 @@ function renderModal(root){
     };
     recvWrap.appendChild(tx('label','flbl','👤 Принял доставку'));
     const rSel=document.createElement('select');rSel.className='finput ro-keep';
-    /* Для read-only — локальный буфер, применяется по «Сохранить» */
-    let _pendingRecv=d.receivedBy||'';
+    /* Для read-only — буфер хранится в m, чтобы не терялся при renderModal.
+       При первом открытии берём из d.receivedBy; дальше пользователь меняет
+       через onchange. Без этого выбор монитора сбрасывался при каждой
+       перерисовке модалки, и сохранять было нечего. */
+    if(m._pendingRecv===undefined)m._pendingRecv=d.receivedBy||'';
     const optEmpty=document.createElement('option');optEmpty.value='';optEmpty.textContent='— выберите —';rSel.appendChild(optEmpty);
     /* Список сотрудников из справочника S.employees. Отображаем только имя
        без должности. Значение опции = employee.id. Если в d.receivedBy
@@ -5970,16 +6077,16 @@ function renderModal(root){
        сотрудника. Legacy-значение в данных не показывается. */
     const emps=(S.employees||[]).slice().filter(e=>e&&e.name);
     emps.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ru'));
-    const inRef=emps.find(e=>e.id===_pendingRecv);
-    if(!inRef)_pendingRecv='';  /* legacy → считаем как «не выбрано» */
+    const inRef=emps.find(e=>e.id===m._pendingRecv);
+    if(!inRef)m._pendingRecv='';  /* legacy → считаем как «не выбрано» */
     emps.forEach(e=>{
       const op=document.createElement('option');op.value=e.id;op.textContent=e.name;
-      if(_pendingRecv===e.id)op.selected=true;
+      if(m._pendingRecv===e.id)op.selected=true;
       rSel.appendChild(op);
     });
     rSel.onchange=e=>{
       if(S.isReadonly||S.isProdChief){
-        _pendingRecv=e.target.value;
+        m._pendingRecv=e.target.value;
         m._saved=false;
         renderModal(root);
         return;
@@ -5998,6 +6105,14 @@ function renderModal(root){
     delBox.appendChild(recvWrap);
     showRecv();
     tg.onclick=()=>{
+      /* Снимать отметку «Доставлено» могут только администратор/менеджер.
+         Монитор и начальник производства — нет: после фиксации приёмка
+         считается подтверждённой. Если поставка пришла с проблемой, есть
+         отдельный механизм рекламаций. */
+      if(d.delivered&&(S.isReadonly||S.isProdChief)){
+        alert('Снять отметку «Доставлено» может только администратор или менеджер. Если поставка пришла с проблемой — откройте рекламацию.');
+        return;
+      }
       if(!d.delivered){
         d.delivered=true;
         if(!d.deliveredAt)d.deliveredAt=dk(TODAY);
@@ -6008,9 +6123,11 @@ function renderModal(root){
       }else{
         if(!d.receivedBy){
           d.delivered=false;d.deliveredAt='';
+          m._pendingRecv='';
         }else{
           if(!confirm('Снять отметку «Доставлено»? Получатель «'+d.receivedBy.replace('_',' · ')+'» будет очищен.'))return;
           d.delivered=false;d.deliveredAt='';d.receivedBy='';rSel.value='';
+          m._pendingRecv='';
         }
         tg.style.background='var(--bg3)';knob.style.left='2px';
         showRecv();
@@ -6121,10 +6238,10 @@ function renderModal(root){
         }
       }else{
         /* Read-only роли. Если монитор переключил tg в OFF — d.delivered
-           уже false локально, _pendingRecv может быть пустым или старым.
+           уже false локально, m._pendingRecv может быть пустым или старым.
            Отменяем приёмку — передадим пустую строку. Если включил
-           обратно или выбрал нового получателя — _pendingRecv заполнен. */
-        if(d.delivered&&!_pendingRecv){
+           обратно или выбрал нового получателя — m._pendingRecv заполнен. */
+        if(d.delivered&&!m._pendingRecv){
           alert('Укажите ответственного, иначе сохранить нельзя');return;
         }
       }
@@ -6134,14 +6251,14 @@ function renderModal(root){
           /* RPC-путь для ролей без права общего UPDATE.
              Если приёмку отменили (d.delivered=false локально) — отправляем
              пустую строку, серверная функция очистит receivedBy/delivered/at. */
-          const target=d.delivered?(_pendingRecv||''):'';
+          const target=d.delivered?(m._pendingRecv||''):'';
           await db.setDeliveryReceivedBy(order.id,d.id,target);
           if(target){
             d.receivedBy=target;d.delivered=true;
             if(!d.deliveredAt)d.deliveredAt=dk(TODAY);
           }else{
             d.receivedBy='';d.delivered=false;d.deliveredAt='';
-            _pendingRecv='';
+            m._pendingRecv='';
           }
           /* После RPC обновляем snapshot, чтобы detectChanges не считал
              те же поля «изменившимися» и не пытался отправить их повторно
@@ -6271,13 +6388,22 @@ function renderModal(root){
     titleIcon.innerHTML=buildHalfSawSVG();
     titleEl.appendChild(titleIcon);
     titleEl.appendChild(document.createTextNode('Производство — '+order.name));
+    /* Счётчик изделий — сразу после названия заказа, тот же шрифт и цвет */
+    const subsCount=order.suborders.length;
+    const subsBadge=el('span','');
+    subsBadge.style.cssText='display:inline-flex;align-items:center;gap:5px;flex-shrink:0';
+    subsBadge.title='Количество изделий в заказе';
+    subsBadge.appendChild(document.createTextNode('🧱 '+subsCount));
+    titleEl.appendChild(subsBadge);
     modal.appendChild(titleEl);
     if(order.client){
       const cli=tx('div','',order.client);
       cli.style.cssText='font-size:12px;color:var(--text2);margin-top:-6px;margin-bottom:12px';
       modal.appendChild(cli);
     }
-    const NOW=new Date();
+    /* Сегодняшний календарный день — фильтр для активных этапов:
+       показываем все, чей plan-интервал [start, end) пересекает сегодня. */
+    const todayMs=TODAY.getTime();
     const list=el('div','');
     list.style.cssText='display:flex;flex-direction:column;gap:6px;margin-top:6px';
     if(order.suborders.length===0){
@@ -6302,11 +6428,14 @@ function renderModal(root){
       const name=tx('div','',sub.name);
       name.style.cssText='font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
       nameWrap.appendChild(name);
-      /* Текущий этап: ищем тот этап, у которого start <= NOW < end. */
-      let activeStage=null;
+      /* Этапы, запланированные на сегодня — те, чей календарный интервал
+         [start, end) пересекает сегодняшний день. Учитываются и те, что
+         ещё не начались по часам (план есть → значит сегодня в работе). */
+      const activeStages=[];
       for(const stg of sub.stages){
-        const ss=stageStartDt(stg),se=stageEndDt(stg);
-        if(ss<=NOW&&NOW<se){activeStage=stg;break}
+        const sMs=parseISO(stg.start).getTime();
+        const eMs=parseISO(stg.end).getTime();
+        if(sMs<=todayMs&&todayMs<eMs)activeStages.push(stg);
       }
       /* Сводка прогресса (готовых из всех) */
       const dCount=sub.stages.filter(x=>x.status==='done').length;
@@ -6314,26 +6443,71 @@ function renderModal(root){
       progress.style.cssText='font-size:11px;color:var(--text3);margin-top:2px';
       nameWrap.appendChild(progress);
       row.appendChild(nameWrap);
-      /* Бейдж текущего этапа */
-      const stageBadge=el('div','');
-      stageBadge.style.cssText='display:inline-flex;align-items:center;gap:5px;padding:3px 8px;'
-        +'border-radius:99px;font-size:11px;flex-shrink:0';
+      /* Контейнер для бейджей текущих этапов */
+      const badgesWrap=el('div','');
+      badgesWrap.style.cssText='display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;flex-shrink:0;max-width:55%';
       if(sub.status==='done'){
-        stageBadge.style.cssText+=';background:rgba(63,185,80,.12);border:1px solid #3fb950;color:#3fb950';
-        stageBadge.textContent='✓ Готово';
-      }else if(activeStage){
-        const def=getStageDef(activeStage.id,sub);
-        const c=def?.color||'var(--accent)';
-        stageBadge.style.cssText+=';background:'+c+'20;border:1px solid '+c+';color:'+c;
-        const sdot=el('span','');
-        sdot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+c;
-        stageBadge.appendChild(sdot);
-        stageBadge.appendChild(document.createTextNode(def?.lbl||activeStage.id));
+        const b=el('div','');
+        b.style.cssText='display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:99px;font-size:11px;'
+          +'background:rgba(63,185,80,.12);border:1px solid #3fb950;color:#3fb950';
+        b.textContent='✓ Готово';
+        badgesWrap.appendChild(b);
+      }else if(activeStages.length===0){
+        const b=el('div','');
+        b.style.cssText='display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:99px;font-size:11px;'
+          +'background:var(--bg2);border:1px solid var(--border2);color:var(--text3)';
+        b.textContent='—';
+        badgesWrap.appendChild(b);
       }else{
-        stageBadge.style.cssText+=';background:var(--bg2);border:1px solid var(--border2);color:var(--text3)';
-        stageBadge.textContent='—';
+        activeStages.forEach(stg=>{
+          const def=getStageDef(stg.id,sub);
+          const c=def?.color||'var(--accent)';
+          const b=el('div','');
+          b.style.cssText='display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:99px;font-size:11px;'
+            +'background:'+c+'20;border:1px solid '+c+';color:'+c+';cursor:help';
+          const sdot=el('span','');
+          sdot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+c+';flex-shrink:0';
+          b.appendChild(sdot);
+          b.appendChild(document.createTextNode(def?.lbl||stg.id));
+          /* Tooltip: список ответственных + плановая дата окончания */
+          b.addEventListener('mouseenter',ev=>{
+            const tt=document.getElementById('tt');if(!tt)return;
+            const arr=Array.isArray(stg.assignees)?stg.assignees:[];
+            /* Реальная плановая дата/час окончания через stageActualEnd —
+               учитывает обед, перенос на следующий рабочий день и т. д. */
+            const ae=stageActualEnd(stg,sub);
+            const endStr=fmtS(ae.date)+' '+fmtHM(ae.hour);
+            const dotHtml='<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:'+c+';margin-right:6px;vertical-align:middle"></span>';
+            let html='<div class="tt-r" style="font-weight:600">'+dotHtml+(def?.lbl||stg.id)+'</div>';
+            html+='<div class="tt-r" style="color:var(--text2);margin-top:4px">Окончание: '+endStr+'</div>';
+            if(arr.length===0){
+              html+='<div class="tt-r" style="color:#f85149;margin-top:4px">🏳 Без ответственного</div>';
+            }else{
+              const lines=arr.map(v=>{
+                const u=resolveEmployee(v);
+                return '👤 '+u.name+(u.role?' <span style="color:var(--text3);font-size:10px">· '+u.role+'</span>':'');
+              });
+              html+='<div class="tt-r" style="color:var(--text2);margin-top:4px">'+lines.join('<br>')+'</div>';
+            }
+            tt.innerHTML=html;
+            tt.style.display='block';
+            let x=ev.clientX+14,y=ev.clientY+14;
+            if(x+260>window.innerWidth)x=ev.clientX-260-14;
+            if(y+140>window.innerHeight)y=ev.clientY-140-14;
+            tt.style.left=x+'px';tt.style.top=y+'px';
+          });
+          b.addEventListener('mousemove',ev=>{
+            const tt=document.getElementById('tt');if(!tt||tt.style.display==='none')return;
+            let x=ev.clientX+14,y=ev.clientY+14;
+            if(x+260>window.innerWidth)x=ev.clientX-260-14;
+            if(y+140>window.innerHeight)y=ev.clientY-140-14;
+            tt.style.left=x+'px';tt.style.top=y+'px';
+          });
+          b.addEventListener('mouseleave',()=>hideTT());
+          badgesWrap.appendChild(b);
+        });
       }
-      row.appendChild(stageBadge);
+      row.appendChild(badgesWrap);
       list.appendChild(row);
     });
     modal.appendChild(list);
